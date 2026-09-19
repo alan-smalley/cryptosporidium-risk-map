@@ -1,0 +1,6 @@
+[theme]
+primaryColor = "#0284C7"       # Utility Blue
+backgroundColor = "#F8FAFC"    # Off-white / Slate
+secondaryBackgroundColor = "#FFFFFF" # White cards/sidebars
+textColor = "#0F172A"          # Dark slate text
+font = "sans serif"
