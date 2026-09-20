@@ -1,5 +1,5 @@
 streamlit
-plotly
+pplotly<6.0.0
 pandas
 numpy
 pyproj
