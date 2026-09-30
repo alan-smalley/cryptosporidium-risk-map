@@ -187,7 +187,11 @@ with col_map:
     # Highlight currently selected site with a central black dot
     selected_row = latest_df[latest_df['Site'] == selected_site]
     if not selected_row.empty:
-        ScatterTrace = getattr(go, "Scattermap", go.Scattermapbox)
+        if hasattr(go, "Scattermap"):
+            ScatterTrace = go.Scattermap
+        else:
+            ScatterTrace = go.Scattermapbox
+
         fig_map.add_trace(ScatterTrace(
             lat=selected_row['lat'],
             lon=selected_row['lon'],
