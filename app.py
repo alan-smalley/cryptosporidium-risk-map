@@ -196,7 +196,7 @@ with col_chart:
         yaxis_title="Risk Score",
         hovermode="x unified", 
         template="plotly_white",
-        margin=dict(t=40, b=20, l=20, r=20),
+        margin=dict(t=70, b=30, l=20, r=20),  # Increased top margin from 40 to 70
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
     )
     st.plotly_chart(fig_chart, use_container_width=True)
