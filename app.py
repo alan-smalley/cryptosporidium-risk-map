@@ -244,7 +244,7 @@ with col_chart:
             pad=dict(b=15)
         ),
         xaxis_title="Month", 
-        yaxis_title="Risk Score",
+        yaxis_title="Mean Crypto conc (oocysts/L)",
         hovermode="x unified", 
         template="plotly_white",
         margin=dict(t=100, b=30, l=20, r=20),
