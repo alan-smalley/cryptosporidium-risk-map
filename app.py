@@ -108,13 +108,12 @@ with st.sidebar.expander("ℹ️ Portal Disclaimer & Risk Definitions"):
     * 🔴 **High Risk:** > 0.50 oocysts/L
     """)
 
-# State management initialization for site selection
+# Initialize active site in session state
 site_list = sorted(df['Site'].unique())
 if "selected_site" not in st.session_state:
     st.session_state["selected_site"] = site_list[0]
 
-if "dropdown_site_choice" not in st.session_state:
-    st.session_state["dropdown_site_choice"] = st.session_state["selected_site"]
+selected_site = st.session_state["selected_site"]
 
 # ---------------------------------------------------------
 # 5. Dashboard View (Interactive Map & Inspector)
@@ -124,7 +123,7 @@ st.caption("Interactive Risk Predictions & Historical Water Intake Monitoring")
 
 col_map, col_chart = st.columns([1.3, 1])
 
-# Column 1: Mapbox/MapLibre Risk Map with Click Event
+# Column 1: Interactive Map
 with col_map:
     st.subheader(f"Catchment Risk Levels ({selected_month})")
     st.caption("💡 *Click any catchment marker on the map to inspect its trend.*")
@@ -146,7 +145,7 @@ with col_map:
             color_discrete_map=risk_color_map,
             category_orders={"predicted_risk_level": ["High", "Medium", "Low", "No Data"]},
             hover_name="Site",
-            custom_data=["Site"],  # Attaches exact Site name directly to plot points
+            custom_data=["Site"],
             hover_data={
                 "predicted_risk_level": True,
                 "predicted_risk": ":.4f",
@@ -166,7 +165,7 @@ with col_map:
             color_discrete_map=risk_color_map,
             category_orders={"predicted_risk_level": ["High", "Medium", "Low", "No Data"]},
             hover_name="Site",
-            custom_data=["Site"],  # Attaches exact Site name directly to plot points
+            custom_data=["Site"],
             hover_data={
                 "predicted_risk_level": True,
                 "predicted_risk": ":.4f",
@@ -178,13 +177,32 @@ with col_map:
             mapbox_style="carto-positron"
         )
     
-    fig_map.update_traces(marker={"size": 13, "opacity": 0.85})
+    # Maintain full marker opacity across all states (stops unselected markers from dimming)
+    fig_map.update_traces(
+        marker={"size": 13, "opacity": 0.85},
+        unselected={"marker": {"opacity": 0.85}},
+        selected={"marker": {"opacity": 0.85}}
+    )
+
+    # Highlight currently selected site with a central black dot
+    selected_row = latest_df[latest_df['Site'] == selected_site]
+    if not selected_row.empty:
+        ScatterTrace = getattr(go, "Scattermap", go.Scattermapbox)
+        fig_map.add_trace(ScatterTrace(
+            lat=selected_row['lat'],
+            lon=selected_row['lon'],
+            mode="markers",
+            marker=dict(size=5, color="black"),
+            hoverinfo="skip",
+            showlegend=False
+        ))
+
     fig_map.update_layout(
         margin={"r": 0, "t": 0, "l": 0, "b": 0},
         legend_title_text="Predicted Risk Level"
     )
     
-    # Enable point selection on map
+    # Render map and register selection events
     map_event = st.plotly_chart(
         fig_map, 
         use_container_width=True, 
@@ -193,30 +211,18 @@ with col_map:
         key="map_plot"
     )
 
-    # Detect map click and sync with session_state
+    # Capture click event and update state
     if map_event and "selection" in map_event and map_event["selection"].get("points"):
         points = map_event["selection"]["points"]
         if points and "customdata" in points[0]:
             clicked_site = points[0]["customdata"][0]
             if clicked_site != st.session_state["selected_site"]:
                 st.session_state["selected_site"] = clicked_site
-                st.session_state["dropdown_site_choice"] = clicked_site
                 st.rerun()
 
-# Column 2: Catchment Inspector Chart
+# Column 2: Historical Trend Line Chart
 with col_chart:
-    st.subheader("Site Risk Inspector")
-    
-    # Callback when user manually changes the dropdown
-    def on_dropdown_change():
-        st.session_state["selected_site"] = st.session_state["dropdown_site_choice"]
-
-    selected_site = st.selectbox(
-        "Select Catchment to View Historical Trend:", 
-        site_list, 
-        key="dropdown_site_choice",
-        on_change=on_dropdown_change
-    )
+    st.subheader(f"Site Risk Inspector: {selected_site}")
     
     site_df = df[df['Site'] == selected_site].sort_values('YearMonth')
     
