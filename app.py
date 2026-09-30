@@ -38,6 +38,15 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
+
+# 2a. Reload / Reset Data Button in Sidebar (placed BEFORE data loads)
+if st.sidebar.button("Reload Data"):
+    st.session_state.clear()
+    st.cache_data.clear()
+    st.rerun()
+
+st.sidebar.divider()  # Optional visual line under the button
+
 # ---------------------------------------------------------
 # 3. Secure Data Loading & Coordinate Transformation
 # ---------------------------------------------------------
