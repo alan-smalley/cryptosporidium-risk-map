@@ -53,17 +53,19 @@ def load_and_prepare_data():
         st.error(f"⚠️ Failed to load CSV data. Please check file paths or Streamlit Secrets. Details: {e}")
         st.stop()
 
-    # Convert OSGB36 Eastings/Northings to WGS84 Lat/Lon
+    # Convert OSGB36 Eastings/Northings (EPSG:27700) to WGS84 Lat/Lon (EPSG:4326)
     transformer = pyproj.Transformer.from_crs("epsg:27700", "epsg:4326", always_xy=True)
     meta_df['lon'], meta_df['lat'] = transformer.transform(
         meta_df['Eastings'].values, 
         meta_df['Northings'].values
     )
 
+    # Handle missing values
     pred_df['predicted_risk_level'] = pred_df['predicted_risk_level'].fillna('No Data')
     if 'observed_risk_level' in pred_df.columns:
         pred_df['observed_risk_level'] = pred_df['observed_risk_level'].fillna('No Data')
 
+    # Merge spatial metadata with risk predictions
     merged_df = pd.merge(
         pred_df, 
         meta_df[['Site', 'Site_No', 'Region', 'lat', 'lon']], 
@@ -106,10 +108,13 @@ with st.sidebar.expander("ℹ️ Portal Disclaimer & Risk Definitions"):
     * 🔴 **High Risk:** > 0.50 oocysts/L
     """)
 
-# Initialize selected site in session state if not set
+# State management initialization for site selection
 site_list = sorted(df['Site'].unique())
 if "selected_site" not in st.session_state:
     st.session_state["selected_site"] = site_list[0]
+
+if "dropdown_site_choice" not in st.session_state:
+    st.session_state["dropdown_site_choice"] = st.session_state["selected_site"]
 
 # ---------------------------------------------------------
 # 5. Dashboard View (Interactive Map & Inspector)
@@ -119,7 +124,7 @@ st.caption("Interactive Risk Predictions & Historical Water Intake Monitoring")
 
 col_map, col_chart = st.columns([1.3, 1])
 
-# Column 1: Map with Click Selection Event
+# Column 1: Mapbox/MapLibre Risk Map with Click Event
 with col_map:
     st.subheader(f"Catchment Risk Levels ({selected_month})")
     st.caption("💡 *Click any catchment marker on the map to inspect its trend.*")
@@ -131,7 +136,7 @@ with col_map:
         "No Data": "#94A3B8"
     }
     
-    # Version-safe check for Plotly 6+ vs Plotly 5
+    # Version-safe check for Plotly 6+ (scatter_map) vs Plotly 5 (scatter_mapbox)
     if hasattr(px, "scatter_map"):
         fig_map = px.scatter_map(
             latest_df,
@@ -141,7 +146,13 @@ with col_map:
             color_discrete_map=risk_color_map,
             category_orders={"predicted_risk_level": ["High", "Medium", "Low", "No Data"]},
             hover_name="Site",
-            hover_data={"predicted_risk_level": True, "predicted_risk": ":.4f", "lat": False, "lon": False},
+            custom_data=["Site"],  # Attaches exact Site name directly to plot points
+            hover_data={
+                "predicted_risk_level": True,
+                "predicted_risk": ":.4f",
+                "lat": False,
+                "lon": False
+            },
             zoom=5,
             center={"lat": 55.0, "lon": -3.5},
             map_style="carto-positron"
@@ -155,7 +166,13 @@ with col_map:
             color_discrete_map=risk_color_map,
             category_orders={"predicted_risk_level": ["High", "Medium", "Low", "No Data"]},
             hover_name="Site",
-            hover_data={"predicted_risk_level": True, "predicted_risk": ":.4f", "lat": False, "lon": False},
+            custom_data=["Site"],  # Attaches exact Site name directly to plot points
+            hover_data={
+                "predicted_risk_level": True,
+                "predicted_risk": ":.4f",
+                "lat": False,
+                "lon": False
+            },
             zoom=5,
             center={"lat": 55.0, "lon": -3.5},
             mapbox_style="carto-positron"
@@ -176,30 +193,27 @@ with col_map:
         key="map_plot"
     )
 
-    # Check if a point on the map was clicked
+    # Detect map click and sync with session_state
     if map_event and "selection" in map_event and map_event["selection"].get("points"):
         points = map_event["selection"]["points"]
-        if points:
-            clicked_idx = points[0]["point_index"]
-            clicked_site = latest_df.iloc[clicked_idx]["Site"]
+        if points and "customdata" in points[0]:
+            clicked_site = points[0]["customdata"][0]
             if clicked_site != st.session_state["selected_site"]:
                 st.session_state["selected_site"] = clicked_site
+                st.session_state["dropdown_site_choice"] = clicked_site
                 st.rerun()
 
 # Column 2: Catchment Inspector Chart
 with col_chart:
     st.subheader("Site Risk Inspector")
     
-    # Callback to handle dropdown menu selection
+    # Callback when user manually changes the dropdown
     def on_dropdown_change():
         st.session_state["selected_site"] = st.session_state["dropdown_site_choice"]
 
-    # Dropdown menu synced with session_state
-    current_idx = site_list.index(st.session_state["selected_site"]) if st.session_state["selected_site"] in site_list else 0
     selected_site = st.selectbox(
         "Select Catchment to View Historical Trend:", 
         site_list, 
-        index=current_idx,
         key="dropdown_site_choice",
         on_change=on_dropdown_change
     )
@@ -225,12 +239,15 @@ with col_chart:
         ))
     
     fig_chart.update_layout(
-        title=f"Risk Score Trend: {selected_site}",
+        title=dict(
+            text=f"Risk Score Trend: {selected_site}",
+            pad=dict(b=15)
+        ),
         xaxis_title="Month", 
         yaxis_title="Risk Score",
         hovermode="x unified", 
         template="plotly_white",
-        margin=dict(t=70, b=30, l=20, r=20),
+        margin=dict(t=100, b=30, l=20, r=20),
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
     )
     st.plotly_chart(fig_chart, use_container_width=True)
