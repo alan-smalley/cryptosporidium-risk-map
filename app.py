@@ -243,7 +243,7 @@ with col_chart:
             text=f"Risk Score Trend: {selected_site}",
             pad=dict(b=15)
         ),
-        xaxis_title="Month", 
+        xaxis_title="Year", 
         yaxis_title="Mean Crypto conc (oocysts/L)",
         hovermode="x unified", 
         template="plotly_white",
