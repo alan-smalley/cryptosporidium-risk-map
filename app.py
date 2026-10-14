@@ -6,6 +6,14 @@ import pyproj
 import streamlit as st
 from shapely import ops, wkb
 
+# Detect Plotly version capabilities for map traces
+if hasattr(go, "Scattermap"):
+    ScatterMapTrace = go.Scattermap
+    MAP_DICT_KEY = "map"
+else:
+    ScatterMapTrace = go.Scattermapbox
+    MAP_DICT_KEY = "mapbox"
+
 # ---------------------------------------------------------
 # 1. UI Password Guard
 # ---------------------------------------------------------
@@ -43,12 +51,12 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-# Initialize coordinate transformer (EPSG:27700 OSGB36 -> EPSG:4326 WGS84)
+# Coordinate transformer (EPSG:27700 OSGB36 -> EPSG:4326 WGS84)
 transformer = pyproj.Transformer.from_crs(
     "EPSG:27700", "EPSG:4326", always_xy=True
 )
 
-# 2a. Reload / Reset Data Button in Sidebar
+# Reload / Reset Data Button in Sidebar
 if st.sidebar.button("Reload Data"):
     st.session_state.clear()
     st.cache_data.clear()
@@ -75,12 +83,10 @@ def load_and_prepare_data():
         )
         st.stop()
 
-    # Convert OSGB36 Eastings/Northings to WGS84 Lat/Lon
     meta_df["lon"], meta_df["lat"] = transformer.transform(
         meta_df["Eastings"].values, meta_df["Northings"].values
     )
 
-    # Handle missing values
     pred_df["predicted_risk_level"] = pred_df["predicted_risk_level"].fillna(
         "No Data"
     )
@@ -89,7 +95,6 @@ def load_and_prepare_data():
             "No Data"
         )
 
-    # Merge spatial metadata with risk predictions
     merged_df = pd.merge(
         pred_df,
         meta_df[["Site", "Site_No", "Region", "lat", "lon"]],
@@ -111,24 +116,38 @@ def parse_gpkg_geom(blob):
     return wkb.loads(blob[header_len:])
 
 
+def normalize_name(s):
+    """Normalizes site names for case- and symbol-insensitive matching."""
+    return str(s).lower().replace(" ", "_").replace("-", "_")
+
+
 @st.cache_data
 def get_site_spatial_data(site_name, amber_thresh=0.5, red_thresh=2.0):
     """Loads upstream river network vectors and scored CSO sites for a target intake."""
-    # A. Extract Feature Importance for Site CSOs
+    norm_site_name = normalize_name(site_name)
+
+    # A. Feature Importance Parsing
+    cso_importance = {}
     try:
         df_feat = pd.read_csv("all_site_feature_importance.csv")
-        site_feats = df_feat[df_feat["Site"] == site_name]
+        df_feat["norm_site"] = df_feat["Site"].apply(normalize_name)
+        site_feats = df_feat[df_feat["norm_site"] == norm_site_name]
 
-        cso_importance = {}
         for _, row in site_feats.iterrows():
             feat = str(row["Feature"])
-            if feat.startswith("CSO_Individual_"):
-                cso_id = feat.replace("CSO_Individual_", "")
-                cso_importance[cso_id] = row["Gain_Percent"]
-    except Exception:
+            if "CSO" in feat:
+                cso_id = (
+                    feat.replace("CSO_Individual_", "")
+                    .replace("CSO_", "")
+                    .strip()
+                )
+                cso_importance[cso_id] = float(row["Gain_Percent"])
+    except Exception as e:
+        st.warning(f"Feature importance load warning: {e}")
         cso_importance = {}
 
-    # B. Load CSO Geometries
+    # B. CSO Geometries from GeoPackage
+    site_csos = pd.DataFrame()
     try:
         conn_cso = sqlite3.connect("riversage_52_catchments__cso_sites.gpkg")
         cso_df = pd.read_sql_query(
@@ -137,14 +156,17 @@ def get_site_spatial_data(site_name, amber_thresh=0.5, red_thresh=2.0):
         )
         conn_cso.close()
 
-        site_csos = cso_df[
-            cso_df["canonical_cso_id"].isin(cso_importance.keys())
-        ].copy()
+        # Convert canonical_cso_id to string to guarantee match
+        cso_df["cso_id_str"] = cso_df["canonical_cso_id"].astype(str).str.strip()
+        search_keys = {str(k).strip(): v for k, v in cso_importance.items()}
+
+        if search_keys:
+            site_csos = cso_df[cso_df["cso_id_str"].isin(search_keys.keys())].copy()
+            site_csos["Gain_Percent"] = (
+                site_csos["cso_id_str"].map(search_keys).fillna(0.0)
+            )
 
         if not site_csos.empty:
-            site_csos["Gain_Percent"] = (
-                site_csos["canonical_cso_id"].map(cso_importance).fillna(0.0)
-            )
             lons, lats = transformer.transform(
                 site_csos["canonical_easting"].values,
                 site_csos["canonical_northing"].values,
@@ -163,24 +185,25 @@ def get_site_spatial_data(site_name, amber_thresh=0.5, red_thresh=2.0):
             site_csos["Impact_Level"] = site_csos["Gain_Percent"].apply(
                 assign_color
             )
-    except Exception:
-        site_csos = pd.DataFrame()
+    except Exception as e:
+        st.warning(f"CSO GPKG load warning: {e}")
 
-    # C. Load Upstream River Reach Geometry Vectors
+    # C. Upstream River Reach Vectors
     river_lons, river_lats = [], []
     try:
         conn_net = sqlite3.connect(
             "riversage_52_catchments__upstream_networks.gpkg"
         )
-        cursor = conn_net.cursor()
-        cursor.execute(
-            "SELECT geom FROM riversage_52_catchments__upstream_networks WHERE target_name = ?",
-            (site_name,),
+        net_df = pd.read_sql_query(
+            "SELECT target_name, geom FROM riversage_52_catchments__upstream_networks",
+            conn_net,
         )
-        net_rows = cursor.fetchall()
         conn_net.close()
 
-        for (geom_blob,) in net_rows:
+        net_df["norm_target"] = net_df["target_name"].apply(normalize_name)
+        matched_net = net_df[net_df["norm_target"] == norm_site_name]
+
+        for geom_blob in matched_net["geom"]:
             if geom_blob:
                 geom = parse_gpkg_geom(geom_blob)
                 geom_wgs84 = ops.transform(transformer.transform, geom)
@@ -193,8 +216,8 @@ def get_site_spatial_data(site_name, amber_thresh=0.5, red_thresh=2.0):
                     coords = list(g.coords)
                     river_lons.extend([c[0] for c in coords] + [None])
                     river_lats.extend([c[1] for c in coords] + [None])
-    except Exception:
-        pass
+    except Exception as e:
+        st.warning(f"River network load warning: {e}")
 
     return site_csos, river_lons, river_lats
 
@@ -225,13 +248,17 @@ st.sidebar.write(f"🟡 **Medium Risk:** {med_count}")
 st.sidebar.write(f"🟢 **Low Risk:** {low_count}")
 
 st.sidebar.divider()
-st.sidebar.markdown("### CSO Model Settings")
+st.sidebar.markdown("### CSO & Map Settings")
 amber_thresh = st.sidebar.slider(
     "Amber Threshold (% Gain)", 0.0, 2.0, 0.5, step=0.1
 )
 red_thresh = st.sidebar.slider(
     "Red Threshold (% Gain)", 1.0, 10.0, 2.0, step=0.5
 )
+
+# Base Map Style Toggle (Default = OFF / Clean Vector Style)
+show_terrain = st.sidebar.checkbox("Enable Terrain / Topo Map Background", value=False)
+base_map_style = "open-street-map" if show_terrain else "carto-positron"
 
 st.sidebar.divider()
 with st.sidebar.expander("ℹ️ Portal Disclaimer & Risk Definitions"):
@@ -245,7 +272,7 @@ with st.sidebar.expander("ℹ️ Portal Disclaimer & Risk Definitions"):
     * 🔴 **High Risk:** > 0.50 oocysts/L
     """)
 
-# Initialize active site in session state
+# Active site state
 site_list = sorted(df["Site"].unique())
 if "selected_site" not in st.session_state:
     st.session_state["selected_site"] = site_list[0]
@@ -292,7 +319,7 @@ with col_map:
             },
             zoom=5,
             center={"lat": 55.0, "lon": -3.5},
-            map_style="carto-positron",
+            map_style=base_map_style,
         )
     else:
         fig_map = px.scatter_mapbox(
@@ -314,7 +341,7 @@ with col_map:
             },
             zoom=5,
             center={"lat": 55.0, "lon": -3.5},
-            mapbox_style="carto-positron",
+            mapbox_style=base_map_style,
         )
 
     fig_map.update_traces(
@@ -323,12 +350,10 @@ with col_map:
         selected={"marker": {"opacity": 0.85}},
     )
 
-    # Highlight currently selected site with a central black dot
     selected_row = latest_df[latest_df["Site"] == selected_site]
     if not selected_row.empty:
-        ScatterTrace = go.Scattermap if hasattr(go, "Scattermap") else go.Scattermapbox
         fig_map.add_trace(
-            ScatterTrace(
+            ScatterMapTrace(
                 lat=selected_row["lat"],
                 lon=selected_row["lon"],
                 mode="markers",
@@ -428,10 +453,10 @@ site_csos, river_lons, river_lats = get_site_spatial_data(
 if river_lons or not site_csos.empty:
     fig_cso_map = go.Figure()
 
-    # 1. Add River Reach Line Network
+    # 1. River Reach Lines
     if river_lons:
         fig_cso_map.add_trace(
-            go.Scattermapbox(
+            ScatterMapTrace(
                 lon=river_lons,
                 lat=river_lats,
                 mode="lines",
@@ -441,7 +466,7 @@ if river_lons or not site_csos.empty:
             )
         )
 
-    # 2. Add CSO Markers Grouped by Importance Threshold
+    # 2. CSO Markers Grouped by Impact
     cso_color_map = {
         "Red (High Impact)": "#E63946",
         "Amber (Moderate Impact)": "#FFB703",
@@ -451,7 +476,7 @@ if river_lons or not site_csos.empty:
     if not site_csos.empty:
         for level, df_group in site_csos.groupby("Impact_Level"):
             fig_cso_map.add_trace(
-                go.Scattermapbox(
+                ScatterMapTrace(
                     lon=df_group["lon"],
                     lat=df_group["lat"],
                     mode="markers",
@@ -493,26 +518,29 @@ if river_lons or not site_csos.empty:
     else:
         c_lat, c_lon = 55.0, -3.5
 
-    fig_cso_map.update_layout(
-        mapbox=dict(
-            style="carto-positron",
-            center=dict(lat=c_lat, lon=c_lon),
-            zoom=10,
-        ),
-        margin=dict(l=0, r=0, t=0, b=0),
-        height=550,
-        legend=dict(
+    map_config = {
+        "style": base_map_style,
+        "center": dict(lat=c_lat, lon=c_lon),
+        "zoom": 10,
+    }
+
+    layout_kwargs = {
+        MAP_DICT_KEY: map_config,
+        "margin": dict(l=0, r=0, t=0, b=0),
+        "height": 550,
+        "legend": dict(
             yanchor="top",
             y=0.98,
             xanchor="left",
             x=0.01,
             bgcolor="rgba(255, 255, 255, 0.8)",
         ),
-    )
+    }
+
+    fig_cso_map.update_layout(**layout_kwargs)
 
     st.plotly_chart(fig_cso_map, use_container_width=True)
 
-    # Optional Breakdown Table for Contributing CSOs
     if not site_csos.empty:
         with st.expander("📋 View Contributing CSO Feature Breakdown"):
             cso_display = site_csos[
@@ -532,6 +560,10 @@ if river_lons or not site_csos.empty:
                 "Impact Level",
             ]
             st.dataframe(cso_display, use_container_width=True)
+    else:
+        st.info(
+            f"ℹ️ Upstream river channels displayed. No upstream CSOs identified for intake site: **{selected_site}**."
+        )
 else:
     st.info(
         f"No upstream network or CSO features found for intake site: **{selected_site}**."
