@@ -141,7 +141,7 @@ def get_site_spatial_data(site_name, amber_thresh=0.5, red_thresh=2.0):
                     .replace("CSO_", "")
                     .strip()
                 )
-                cso_importance[cso_id] = float(row["Gain_Percent"])
+                cso_importance[cso_id] = float(row["Mean_Gain_Percent"])
     except Exception as e:
         st.warning(f"Feature importance load warning: {e}")
         cso_importance = {}
@@ -220,7 +220,6 @@ def get_site_spatial_data(site_name, amber_thresh=0.5, red_thresh=2.0):
         st.warning(f"River network load warning: {e}")
 
     return site_csos, river_lons, river_lats
-
 
 df = load_and_prepare_data()
 
