@@ -18,14 +18,14 @@ else:
 # ---------------------------------------------------------
 # Site Selection & Initial Load Configuration
 # ---------------------------------------------------------
-# Set the default site that loads first when opening the portal
+# Default site that loads first when opening the portal
 INITIAL_SITE = "River_Thames_Laleham"
 
-# To restrict display to a specific list of sites, uncomment the triple-quoted list below
-# and set `CUSTOM_SITE_LIST = SITES_TO_DISPLAY`.
-# When set to None or empty, the app defaults to displaying ALL available sites.
+# Toggle custom filtering:
+# Set to True to restrict the app to SITES_TO_DISPLAY.
+# Set to False to display ALL available sites in the dataset.
+ENABLE_CUSTOM_SITE_FILTER = False
 
-"""
 SITES_TO_DISPLAY = [
     "River_Deveron_TurriffMuiresk",
     "River_Ugie_Forehill",
@@ -78,11 +78,10 @@ SITES_TO_DISPLAY = [
     "River_Rother_Hardham",
     "River_Test_Testwood",
     "River_Exe_AllersWTW",
-    "RIver_Dart_Littlehempston"
+    "RIver_Dart_Littlehempston",
 ]
-"""
 
-CUSTOM_SITE_LIST = None  # Change to SITES_TO_DISPLAY when uncommenting above
+CUSTOM_SITE_LIST = SITES_TO_DISPLAY if ENABLE_CUSTOM_SITE_FILTER else None
 
 # ---------------------------------------------------------
 # 1. UI Password Guard
