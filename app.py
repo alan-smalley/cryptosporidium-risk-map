@@ -16,6 +16,75 @@ else:
     MAP_DICT_KEY = "mapbox"
 
 # ---------------------------------------------------------
+# Site Selection & Initial Load Configuration
+# ---------------------------------------------------------
+# Set the default site that loads first when opening the portal
+INITIAL_SITE = "River_Thames_Laleham"
+
+# To restrict display to a specific list of sites, uncomment the triple-quoted list below
+# and set `CUSTOM_SITE_LIST = SITES_TO_DISPLAY`.
+# When set to None or empty, the app defaults to displaying ALL available sites.
+
+"""
+SITES_TO_DISPLAY = [
+    "River_Deveron_TurriffMuiresk",
+    "River_Ugie_Forehill",
+    "River_Deveron_CairnfordBridgeHuntly",
+    "Allt_a_Choire_Burn_Tomnavoulin",
+    "River_Dee_Invercannie",
+    "River_Tay_Perth",
+    "River_Wear_Lumley",
+    "River_Gelt",
+    "River_Eden",
+    "River_Duddon",
+    "River_Dee_3",
+    "River_Dee_2",
+    "River_Esk_Whitby",
+    "River_Ure_Masham",
+    "River_Ouse_York",
+    "River_Hull_Driffield",
+    "River_Derwent_Elvington_2",
+    "River_Derwent_Wressle",
+    "Afon_Ddu_BrynCowlyd",
+    "River_Dee_1",
+    "River_Teifi_Llechryd",
+    "River_Severn_Shelton",
+    "River_Severn_TrimpleyWTW",
+    "River_Bure_Belaugh",
+    "River_Wensum_Costessey",
+    "River_Nar_Marham",
+    "River_Wensum_Heigham",
+    "River_Wissey_StokeFerry",
+    "River_Waveney",
+    "River_Great_Ouse_GrafhamSystem",
+    "River_Great_Ouse_Bedford",
+    "River_Stour_Langham",
+    "River_Blackwater_Langford",
+    "River_Lee_NewGauge",
+    "River_Chelmer_Langford",
+    "River_Lee_Girling",
+    "River_Cherwell_Grimsbury",
+    "River_Great_Ouse_Foxcote",
+    "River_Thames_Farmoor",
+    "River_Thames_Datchet",
+    "River_Thames_HytheEnd",
+    "River_Thames_Walton",
+    "River_Thames_Laleham",
+    "RIver_Kennet_Fobney",
+    "River_Tillingbourne_Shalford",
+    "River_Wey_Shalford",
+    "River_Rother_Robertsbridge",
+    "River_Itchen_Otterbourne",
+    "River_Rother_Hardham",
+    "River_Test_Testwood",
+    "River_Exe_AllersWTW",
+    "RIver_Dart_Littlehempston"
+]
+"""
+
+CUSTOM_SITE_LIST = None  # Change to SITES_TO_DISPLAY when uncommenting above
+
+# ---------------------------------------------------------
 # 1. UI Password Guard
 # ---------------------------------------------------------
 def check_password():
@@ -52,12 +121,10 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-# Coordinate transformer (EPSG:27700 OSGB36 -> EPSG:4326 WGS84)
 transformer = pyproj.Transformer.from_crs(
     "EPSG:27700", "EPSG:4326", always_xy=True
 )
 
-# Reload / Reset Data Button in Sidebar
 if st.sidebar.button("Reload Data"):
     st.session_state.clear()
     st.cache_data.clear()
@@ -234,19 +301,47 @@ def get_site_spatial_data(site_name, amber_thresh=0.5, red_thresh=2.0):
     return site_csos, river_lons, river_lats
 
 
-# Load dataset once helper functions are registered
 df = load_and_prepare_data()
+
+# Filter sites if a custom list is defined
+all_available_sites = sorted(df["Site"].unique())
+if CUSTOM_SITE_LIST and len(CUSTOM_SITE_LIST) > 0:
+    norm_custom = [normalize_name(s) for s in CUSTOM_SITE_LIST]
+    site_list = [s for s in all_available_sites if normalize_name(s) in norm_custom]
+    if not site_list:
+        site_list = all_available_sites
+else:
+    site_list = all_available_sites
+
+# Initialize session state for initial load site
+if "selected_site" not in st.session_state or st.session_state["selected_site"] not in site_list:
+    if INITIAL_SITE in site_list:
+        st.session_state["selected_site"] = INITIAL_SITE
+    else:
+        st.session_state["selected_site"] = site_list[0]
 
 # ---------------------------------------------------------
 # 4. Sidebar Controls & Metrics
 # ---------------------------------------------------------
 st.sidebar.title("Navigation & Filters")
-available_months = sorted(df["YearMonth"].unique(), reverse=True)
+
+# Site Selectbox Sync
+site_idx = site_list.index(st.session_state["selected_site"])
+chosen_site = st.sidebar.selectbox("Select Target Intake Site:", site_list, index=site_idx)
+if chosen_site != st.session_state["selected_site"]:
+    st.session_state["selected_site"] = chosen_site
+    st.rerun()
+
+selected_site = st.session_state["selected_site"]
+
+filtered_df = df[df["Site"].isin(site_list)].copy()
+
+available_months = sorted(filtered_df["YearMonth"].unique(), reverse=True)
 selected_month = st.sidebar.selectbox(
     "Select Model Calendar Month:", available_months
 )
 
-latest_df = df[df["YearMonth"] == selected_month].copy()
+latest_df = filtered_df[filtered_df["YearMonth"] == selected_month].copy()
 
 st.sidebar.divider()
 st.sidebar.markdown(f"### Summary for **{selected_month}**")
@@ -284,13 +379,6 @@ with st.sidebar.expander("ℹ️ Portal Disclaimer & Risk Definitions"):
     * 🔴 **High Risk:** > 0.50 oocysts/L
     """)
 
-# Active site state
-site_list = sorted(df["Site"].unique())
-if "selected_site" not in st.session_state:
-    st.session_state["selected_site"] = site_list[0]
-
-selected_site = st.session_state["selected_site"]
-
 # ---------------------------------------------------------
 # 5. Dashboard View (Interactive Map & Inspector)
 # ---------------------------------------------------------
@@ -301,7 +389,7 @@ col_map, col_chart = st.columns([1.3, 1])
 
 with col_map:
     st.subheader(f"Catchment Risk Levels ({selected_month})")
-    st.caption("💡 *Click any catchment marker on the map to inspect its trend.*")
+    st.caption("💡 *Click any catchment marker on the map or select from the sidebar.*")
 
     risk_color_map = {
         "High": "#E63946",
@@ -398,6 +486,28 @@ with col_map:
 with col_chart:
     st.subheader(f"Site Risk Inspector: {selected_site}")
 
+    # --- Manual Chart Axis Overrides Expander ---
+    with st.expander("⚙️ Chart Axis Settings (Manual Overrides)"):
+        col_y_box, col_x_box = st.columns(2)
+        
+        with col_y_box:
+            use_manual_y = st.checkbox("Override Y-Axis Range", value=False)
+            if use_manual_y:
+                cy1, cy2 = st.columns(2)
+                y_min = cy1.number_input("Y Min", value=0.0, step=0.05)
+                y_max = cy2.number_input("Y Max", value=1.0, step=0.1)
+            else:
+                y_min, y_max = None, None
+
+        with col_x_box:
+            use_manual_x = st.checkbox("Override X-Axis Range", value=False)
+            if use_manual_x:
+                cx1, cx2 = st.columns(2)
+                x_min = cx1.text_input("X Min (Year/Month)", value="2018-01")
+                x_max = cx2.text_input("X Max (Year/Month)", value="2023-12")
+            else:
+                x_min, x_max = None, None
+
     site_df = df[df["Site"] == selected_site].sort_values("YearMonth")
 
     fig_chart = go.Figure()
@@ -422,7 +532,7 @@ with col_chart:
             )
         )
 
-    fig_chart.update_layout(
+    chart_layout = dict(
         title=dict(text=f"Risk Score Trend: {selected_site}", pad=dict(b=15)),
         xaxis_title="Year",
         yaxis_title="Mean Crypto conc (oocysts/L)",
@@ -433,6 +543,14 @@ with col_chart:
             orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1
         ),
     )
+
+    # Apply manual axis overrides if toggled
+    if use_manual_y:
+        chart_layout["yaxis"] = dict(title="Mean Crypto conc (oocysts/L)", range=[y_min, y_max])
+    if use_manual_x:
+        chart_layout["xaxis"] = dict(title="Year", range=[x_min, x_max])
+
+    fig_chart.update_layout(**chart_layout)
     st.plotly_chart(fig_chart, use_container_width=True)
 
     latest_site_row = site_df[site_df["YearMonth"] == selected_month]
