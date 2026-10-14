@@ -67,59 +67,7 @@ st.sidebar.divider()
 # ---------------------------------------------------------
 # 3. Secure Data Loading & Helper Functions
 # ---------------------------------------------------------
-@st.cache_data
-def load_and_prepare_data():
-    meta_url = st.secrets.get("META_DATA_URL", "zs_combined_(all)_REORDERED.csv")
-    pred_url = st.secrets.get(
-        "PRED_DATA_URL", "compiled_site_adaptive_predictions_with_risk_levels.csv"
-    )
-
-    try:
-        meta_df = pd.read_csv(meta_url)
-        pred_df = pd.read_csv(pred_url)
-    except Exception as e:
-        st.error(
-            f"⚠️ Failed to load CSV data. Please check file paths or Streamlit Secrets. Details: {e}"
-        )
-        st.stop()
-
-    meta_df["lon"], meta_df["lat"] = transformer.transform(
-        meta_df["Eastings"].values, meta_df["Northings"].values
-    )
-
-    pred_df["predicted_risk_level"] = pred_df["predicted_risk_level"].fillna(
-        "No Data"
-    )
-    if "observed_risk_level" in pred_df.columns:
-        pred_df["observed_risk_level"] = pred_df["observed_risk_level"].fillna(
-            "No Data"
-        )
-
-    merged_df = pd.merge(
-        pred_df,
-        meta_df[["Site", "Site_No", "Region", "lat", "lon"]],
-        on="Site",
-        how="left",
-    )
-
-    return merged_df
-
-
-def parse_gpkg_geom(blob):
-    """Parses binary GeoPackage BLOB into Shapely geometry."""
-    if blob is None:
-        return None
-    flags = blob[3]
-    envelope_type = (flags >> 1) & 0x07
-    env_sizes = {0: 0, 1: 32, 2: 48, 3: 48, 4: 64}
-    header_len = 8 + env_sizes.get(envelope_type, 0)
-    return wkb.loads(blob[header_len:])
-
-
-def normalize_name(s):
-    """Normalizes site names for case- and symbol-insensitive matching."""
-    return str(s).lower().replace(" ", "_").replace("-", "_")
-
+import re
 
 @st.cache_data
 def get_site_spatial_data(site_name, amber_thresh=0.5, red_thresh=2.0):
@@ -135,13 +83,18 @@ def get_site_spatial_data(site_name, amber_thresh=0.5, red_thresh=2.0):
 
         for _, row in site_feats.iterrows():
             feat = str(row["Feature"])
-            if "CSO" in feat:
-                cso_id = (
-                    feat.replace("CSO_Individual_", "")
-                    .replace("CSO_", "")
-                    .strip()
-                )
-                cso_importance[cso_id] = float(row["Mean_Gain_Percent"])
+            # Filter for individual CSO features (exclude summary count/mean/max features)
+            if "CSO" in feat and not any(k in feat for k in ["count", "mean", "max", "min"]):
+                gain_val = float(row["Mean_Gain_Percent"])
+                
+                # Extract numeric digits (e.g. '007945' -> '7945' and '007945')
+                digits = re.sub(r"\D", "", feat)
+                if digits:
+                    cso_importance[digits] = gain_val                  # '007945'
+                    cso_importance[str(int(digits))] = gain_val        # '7945'
+                    cso_importance[f"CSO_{digits}"] = gain_val         # 'CSO_007945'
+                    cso_importance[f"CSO_{int(digits)}"] = gain_val    # 'CSO_7945'
+                    cso_importance[feat] = gain_val                    # 'CSO_Individual_CSO_007945'
     except Exception as e:
         st.warning(f"Feature importance load warning: {e}")
         cso_importance = {}
@@ -156,15 +109,26 @@ def get_site_spatial_data(site_name, amber_thresh=0.5, red_thresh=2.0):
         )
         conn_cso.close()
 
-        # Convert canonical_cso_id to string to guarantee match
-        cso_df["cso_id_str"] = cso_df["canonical_cso_id"].astype(str).str.strip()
-        search_keys = {str(k).strip(): v for k, v in cso_importance.items()}
+        # Match canonical_cso_id against importance dictionary variants
+        def find_gain(raw_id):
+            s_id = str(raw_id).strip()
+            digits = re.sub(r"\D", "", s_id)
+            candidates = [
+                s_id, 
+                digits, 
+                str(int(digits)) if digits else "", 
+                f"CSO_{digits}", 
+                f"CSO_{int(digits)}" if digits else ""
+            ]
+            for candidate in candidates:
+                if candidate in cso_importance:
+                    return cso_importance[candidate]
+            return None
 
-        if search_keys:
-            site_csos = cso_df[cso_df["cso_id_str"].isin(search_keys.keys())].copy()
-            site_csos["Gain_Percent"] = (
-                site_csos["cso_id_str"].map(search_keys).fillna(0.0)
-            )
+        cso_df["Gain_Percent"] = cso_df["canonical_cso_id"].apply(find_gain)
+        
+        # Keep only CSOs that matched feature importance for this target intake
+        site_csos = cso_df[cso_df["Gain_Percent"].notna()].copy()
 
         if not site_csos.empty:
             lons, lats = transformer.transform(
