@@ -390,27 +390,43 @@ with col_map:
     st.subheader(f"Catchment Risk Levels ({selected_month})")
     st.caption("💡 *Click any catchment marker on the map or select from the sidebar.*")
 
+    # Map risk levels to descriptive labels including concentration thresholds
+    risk_label_map = {
+        "High": "High Risk (> 0.50 oocysts/L)",
+        "Medium": "Medium Risk (0.25 – 0.50 oocysts/L)",
+        "Low": "Low Risk (< 0.25 oocysts/L)",
+        "No Data": "No Data",
+    }
+    latest_df["risk_display_level"] = latest_df["predicted_risk_level"].map(
+        risk_label_map
+    ).fillna("No Data")
+
     risk_color_map = {
-        "High": "#E63946",
-        "Medium": "#FFB703",
-        "Low": "#2A9D8F",
+        "High Risk (> 0.50 oocysts/L)": "#E63946",
+        "Medium Risk (0.25 – 0.50 oocysts/L)": "#FFB703",
+        "Low Risk (< 0.25 oocysts/L)": "#2A9D8F",
         "No Data": "#94A3B8",
     }
+
+    category_order = [
+        "High Risk (> 0.50 oocysts/L)",
+        "Medium Risk (0.25 – 0.50 oocysts/L)",
+        "Low Risk (< 0.25 oocysts/L)",
+        "No Data",
+    ]
 
     if hasattr(px, "scatter_map"):
         fig_map = px.scatter_map(
             latest_df,
             lat="lat",
             lon="lon",
-            color="predicted_risk_level",
+            color="risk_display_level",
             color_discrete_map=risk_color_map,
-            category_orders={
-                "predicted_risk_level": ["High", "Medium", "Low", "No Data"]
-            },
+            category_orders={"risk_display_level": category_order},
             hover_name="Site",
             custom_data=["Site"],
             hover_data={
-                "predicted_risk_level": True,
+                "risk_display_level": True,
                 "predicted_risk": ":.4f",
                 "lat": False,
                 "lon": False,
@@ -424,15 +440,13 @@ with col_map:
             latest_df,
             lat="lat",
             lon="lon",
-            color="predicted_risk_level",
+            color="risk_display_level",
             color_discrete_map=risk_color_map,
-            category_orders={
-                "predicted_risk_level": ["High", "Medium", "Low", "No Data"]
-            },
+            category_orders={"risk_display_level": category_order},
             hover_name="Site",
             custom_data=["Site"],
             hover_data={
-                "predicted_risk_level": True,
+                "risk_display_level": True,
                 "predicted_risk": ":.4f",
                 "lat": False,
                 "lon": False,
@@ -463,7 +477,7 @@ with col_map:
 
     fig_map.update_layout(
         margin={"r": 0, "t": 0, "l": 0, "b": 0},
-        legend_title_text="Predicted Risk Level",
+        legend_title_text="Predicted Risk Thresholds",
     )
 
     map_event = st.plotly_chart(
@@ -485,110 +499,152 @@ with col_map:
 with col_chart:
     st.subheader(f"Site Risk Inspector: {selected_site}")
 
+    # Graph Display Mode Toggle (Heatmap default)
+    graph_type = st.radio(
+        "Select Graph Display Mode:",
+        ["Heatmap (Risk Levels)", "Line Chart (Concentrations)"],
+        horizontal=True,
+        key="graph_type_selector",
+    )
+
     site_df = df[df["Site"] == selected_site].sort_values("YearMonth")
 
-    # --- Date Range Override Expander ---
-    with st.expander("⚙️ Chart Settings (Filter Date Range)"):
-        use_manual_x = st.checkbox("Override Date Range (X-Axis)", value=False)
-        if use_manual_x:
-            cx1, cx2 = st.columns(2)
-            x_min = cx1.text_input("Start Month (YYYY-MM)", value="2018-01")
-            x_max = cx2.text_input("End Month (YYYY-MM)", value="2023-12")
-            if x_min and x_max:
-                site_df = site_df[
-                    (site_df["YearMonth"] >= x_min)
-                    & (site_df["YearMonth"] <= x_max)
-                ]
+    # --- Chart Settings / Range Filter Expander ---
+    with st.expander("⚙️ Chart Range Settings"):
+        col_opt1, col_opt2 = st.columns(2)
+        
+        with col_opt1:
+            use_manual_x = st.checkbox("Override Date Range (X-Axis)", value=False)
+            if use_manual_x:
+                cx1, cx2 = st.columns(2)
+                x_min = cx1.text_input("Start Month", value="2018-01")
+                x_max = cx2.text_input("End Month", value="2023-12")
+                if x_min and x_max:
+                    site_df = site_df[
+                        (site_df["YearMonth"] >= x_min)
+                        & (site_df["YearMonth"] <= x_max)
+                    ]
 
-    # Map risk levels to categorical numerical values (0 to 3) for heatmap matrix
-    risk_num_map = {"No Data": 0, "Low": 1, "Medium": 2, "High": 3}
+        with col_opt2:
+            if graph_type == "Line Chart (Concentrations)":
+                use_manual_y = st.checkbox("Override Y-Axis Range", value=False)
+                if use_manual_y:
+                    cy1, cy2 = st.columns(2)
+                    y_min = cy1.number_input("Y Min", value=0.0, step=0.05)
+                    y_max = cy2.number_input("Y Max", value=1.0, step=0.1)
+                else:
+                    use_manual_y = False
 
-    x_months = site_df["YearMonth"].tolist()
+    # Render selected graph type
+    if graph_type == "Heatmap (Risk Levels)":
+        risk_num_map = {"No Data": 0, "Low": 1, "Medium": 2, "High": 3}
+        x_months = site_df["YearMonth"].tolist()
 
-    z_pred = [
-        risk_num_map.get(lvl, 0) for lvl in site_df["predicted_risk_level"]
-    ]
-    obs_col = (
-        site_df["observed_risk_level"]
-        if "observed_risk_level" in site_df.columns
-        else ["No Data"] * len(site_df)
-    )
-    z_obs = [risk_num_map.get(lvl, 0) for lvl in obs_col]
-
-    # 2 rows: Top = Predicted Risk, Bottom = Observed Risk
-    z_matrix = [z_pred, z_obs]
-    y_labels = ["Predicted Risk", "Observed Risk"]
-
-    # Interactive hover labels
-    text_pred = [
-        f"<b>Predicted Risk</b><br>Month: {m}<br>Level: {lvl}"
-        for m, lvl in zip(x_months, site_df["predicted_risk_level"])
-    ]
-    text_obs = [
-        f"<b>Observed Risk</b><br>Month: {m}<br>Level: {lvl}"
-        for m, lvl in zip(x_months, obs_col)
-    ]
-    hover_matrix = [text_pred, text_obs]
-
-    # Color steps: 0 -> Grey, 1 -> Green, 2 -> Amber, 3 -> Red
-    discrete_colorscale = [
-        [0.00, "#94A3B8"],
-        [0.25, "#94A3B8"],  # No Data (Grey)
-        [0.25, "#2A9D8F"],
-        [0.50, "#2A9D8F"],  # Low Risk (Green)
-        [0.50, "#FFB703"],
-        [0.75, "#FFB703"],  # Medium Risk (Amber)
-        [0.75, "#E63946"],
-        [1.00, "#E63946"],  # High Risk (Red)
-    ]
-
-    fig_chart = go.Figure(
-        data=go.Heatmap(
-            z=z_matrix,
-            x=x_months,
-            y=y_labels,
-            hoverinfo="text",
-            text=hover_matrix,
-            colorscale=discrete_colorscale,
-            zmin=0,
-            zmax=3,
-            showscale=False,
-            xgap=2,  # Tile separation
-            ygap=6,
+        z_pred = [
+            risk_num_map.get(lvl, 0) for lvl in site_df["predicted_risk_level"]
+        ]
+        obs_col = (
+            site_df["observed_risk_level"]
+            if "observed_risk_level" in site_df.columns
+            else ["No Data"] * len(site_df)
         )
-    )
+        z_obs = [risk_num_map.get(lvl, 0) for lvl in obs_col]
 
-    # Add explicit legend items matching map colors
-    legend_items = [
-        ("Low Risk (🟢)", "#2A9D8F"),
-        ("Medium Risk (🟡)", "#FFB703"),
-        ("High Risk (🔴)", "#E63946"),
-        ("No Data (⚪)", "#94A3B8"),
-    ]
+        z_matrix = [z_pred, z_obs]
+        y_labels = ["Predicted Risk", "Observed Risk"]
 
-    for label, color in legend_items:
-        fig_chart.add_trace(
-            go.Scatter(
-                x=[None],
-                y=[None],
-                mode="markers",
-                marker=dict(size=10, color=color, symbol="square"),
-                name=label,
-                showlegend=True,
+        text_pred = [
+            f"<b>Predicted Risk</b><br>Month: {m}<br>Level: {lvl}"
+            for m, lvl in zip(x_months, site_df["predicted_risk_level"])
+        ]
+        text_obs = [
+            f"<b>Observed Risk</b><br>Month: {m}<br>Level: {lvl}"
+            for m, lvl in zip(x_months, obs_col)
+        ]
+        hover_matrix = [text_pred, text_obs]
+
+        discrete_colorscale = [
+            [0.00, "#94A3B8"],
+            [0.25, "#94A3B8"],  # No Data (Grey)
+            [0.25, "#2A9D8F"],
+            [0.50, "#2A9D8F"],  # Low Risk (Green)
+            [0.50, "#FFB703"],
+            [0.75, "#FFB703"],  # Medium Risk (Amber)
+            [0.75, "#E63946"],
+            [1.00, "#E63946"],  # High Risk (Red)
+        ]
+
+        fig_chart = go.Figure(
+            data=go.Heatmap(
+                z=z_matrix,
+                x=x_months,
+                y=y_labels,
+                hoverinfo="text",
+                text=hover_matrix,
+                colorscale=discrete_colorscale,
+                zmin=0,
+                zmax=3,
+                showscale=False,
+                xgap=2,
+                ygap=6,
             )
         )
 
-    fig_chart.update_layout(
-        title=dict(text=f"Risk Level Timeline: {selected_site}", pad=dict(b=15)),
-        xaxis=dict(title="Year / Month", type="category", tickangle=-45),
-        yaxis=dict(autorange="reversed"),  # Predicted on top, Observed below
-        template="plotly_white",
-        height=320,
-        margin=dict(t=80, b=50, l=20, r=20),
-        legend=dict(
-            orientation="h", yanchor="bottom", y=1.05, xanchor="right", x=1
-        ),
-    )
+        fig_chart.update_layout(
+            title=dict(
+                text=f"Risk Level Timeline: {selected_site}", pad=dict(b=15)
+            ),
+            xaxis=dict(title="Year / Month", type="category", tickangle=-45),
+            yaxis=dict(autorange="reversed"),
+            template="plotly_white",
+            height=300,
+            showlegend=False,  # Legend removed for heatmap
+            margin=dict(t=60, b=50, l=20, r=20),
+        )
+
+    else:
+        # Line Chart (Concentrations)
+        fig_chart = go.Figure()
+        fig_chart.add_trace(
+            go.Scatter(
+                x=site_df["YearMonth"],
+                y=site_df["predicted_risk"],
+                mode="lines+markers",
+                name="Predicted Risk",
+                line=dict(color="#2563EB", width=2.5),
+            )
+        )
+
+        if "observed_risk" in site_df.columns:
+            fig_chart.add_trace(
+                go.Scatter(
+                    x=site_df["YearMonth"],
+                    y=site_df["observed_risk"],
+                    mode="lines+markers",
+                    name="Observed Risk",
+                    line=dict(color="#475569", width=2, dash="dot"),
+                )
+            )
+
+        line_layout = dict(
+            title=dict(text=f"Risk Score Trend: {selected_site}", pad=dict(b=15)),
+            xaxis_title="Year / Month",
+            yaxis_title="Mean Crypto conc (oocysts/L)",
+            hovermode="x unified",
+            template="plotly_white",
+            height=350,
+            margin=dict(t=80, b=40, l=20, r=20),
+            legend=dict(
+                orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1
+            ),
+        )
+
+        if "use_manual_y" in locals() and use_manual_y:
+            line_layout["yaxis"] = dict(
+                title="Mean Crypto conc (oocysts/L)", range=[y_min, y_max]
+            )
+
+        fig_chart.update_layout(**line_layout)
 
     st.plotly_chart(fig_chart, use_container_width=True)
 
