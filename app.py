@@ -3,6 +3,7 @@ import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 import pyproj
+import re
 import streamlit as st
 from shapely import ops, wkb
 
@@ -43,7 +44,7 @@ if not check_password():
     st.stop()
 
 # ---------------------------------------------------------
-# 2. Page Configuration
+# 2. Page Configuration & Coordinate Transformer
 # ---------------------------------------------------------
 st.set_page_config(
     page_title="UK Cryptosporidium Risk Map",
@@ -67,7 +68,59 @@ st.sidebar.divider()
 # ---------------------------------------------------------
 # 3. Secure Data Loading & Helper Functions
 # ---------------------------------------------------------
-import re
+@st.cache_data
+def load_and_prepare_data():
+    meta_url = st.secrets.get("META_DATA_URL", "zs_combined_(all)_REORDERED.csv")
+    pred_url = st.secrets.get(
+        "PRED_DATA_URL", "compiled_site_adaptive_predictions_with_risk_levels.csv"
+    )
+
+    try:
+        meta_df = pd.read_csv(meta_url)
+        pred_df = pd.read_csv(pred_url)
+    except Exception as e:
+        st.error(
+            f"⚠️ Failed to load CSV data. Please check file paths or Streamlit Secrets. Details: {e}"
+        )
+        st.stop()
+
+    meta_df["lon"], meta_df["lat"] = transformer.transform(
+        meta_df["Eastings"].values, meta_df["Northings"].values
+    )
+
+    pred_df["predicted_risk_level"] = pred_df["predicted_risk_level"].fillna(
+        "No Data"
+    )
+    if "observed_risk_level" in pred_df.columns:
+        pred_df["observed_risk_level"] = pred_df["observed_risk_level"].fillna(
+            "No Data"
+        )
+
+    merged_df = pd.merge(
+        pred_df,
+        meta_df[["Site", "Site_No", "Region", "lat", "lon"]],
+        on="Site",
+        how="left",
+    )
+
+    return merged_df
+
+
+def parse_gpkg_geom(blob):
+    """Parses binary GeoPackage BLOB into Shapely geometry."""
+    if blob is None:
+        return None
+    flags = blob[3]
+    envelope_type = (flags >> 1) & 0x07
+    env_sizes = {0: 0, 1: 32, 2: 48, 3: 48, 4: 64}
+    header_len = 8 + env_sizes.get(envelope_type, 0)
+    return wkb.loads(blob[header_len:])
+
+
+def normalize_name(s):
+    """Normalizes site names for case- and symbol-insensitive matching."""
+    return str(s).lower().replace(" ", "_").replace("-", "_")
+
 
 @st.cache_data
 def get_site_spatial_data(site_name, amber_thresh=0.5, red_thresh=2.0):
@@ -83,18 +136,16 @@ def get_site_spatial_data(site_name, amber_thresh=0.5, red_thresh=2.0):
 
         for _, row in site_feats.iterrows():
             feat = str(row["Feature"])
-            # Filter for individual CSO features (exclude summary count/mean/max features)
             if "CSO" in feat and not any(k in feat for k in ["count", "mean", "max", "min"]):
                 gain_val = float(row["Mean_Gain_Percent"])
                 
-                # Extract numeric digits (e.g. '007945' -> '7945' and '007945')
                 digits = re.sub(r"\D", "", feat)
                 if digits:
-                    cso_importance[digits] = gain_val                  # '007945'
-                    cso_importance[str(int(digits))] = gain_val        # '7945'
-                    cso_importance[f"CSO_{digits}"] = gain_val         # 'CSO_007945'
-                    cso_importance[f"CSO_{int(digits)}"] = gain_val    # 'CSO_7945'
-                    cso_importance[feat] = gain_val                    # 'CSO_Individual_CSO_007945'
+                    cso_importance[digits] = gain_val
+                    cso_importance[str(int(digits))] = gain_val
+                    cso_importance[f"CSO_{digits}"] = gain_val
+                    cso_importance[f"CSO_{int(digits)}"] = gain_val
+                    cso_importance[feat] = gain_val
     except Exception as e:
         st.warning(f"Feature importance load warning: {e}")
         cso_importance = {}
@@ -109,7 +160,6 @@ def get_site_spatial_data(site_name, amber_thresh=0.5, red_thresh=2.0):
         )
         conn_cso.close()
 
-        # Match canonical_cso_id against importance dictionary variants
         def find_gain(raw_id):
             s_id = str(raw_id).strip()
             digits = re.sub(r"\D", "", s_id)
@@ -126,8 +176,6 @@ def get_site_spatial_data(site_name, amber_thresh=0.5, red_thresh=2.0):
             return None
 
         cso_df["Gain_Percent"] = cso_df["canonical_cso_id"].apply(find_gain)
-        
-        # Keep only CSOs that matched feature importance for this target intake
         site_csos = cso_df[cso_df["Gain_Percent"].notna()].copy()
 
         if not site_csos.empty:
@@ -185,6 +233,8 @@ def get_site_spatial_data(site_name, amber_thresh=0.5, red_thresh=2.0):
 
     return site_csos, river_lons, river_lats
 
+
+# Load dataset once helper functions are registered
 df = load_and_prepare_data()
 
 # ---------------------------------------------------------
@@ -219,7 +269,6 @@ red_thresh = st.sidebar.slider(
     "Red Threshold (% Gain)", 1.0, 10.0, 2.0, step=0.5
 )
 
-# Base Map Style Toggle (Default = OFF / Clean Vector Style)
 show_terrain = st.sidebar.checkbox("Enable Terrain / Topo Map Background", value=False)
 base_map_style = "open-street-map" if show_terrain else "carto-positron"
 
@@ -250,7 +299,6 @@ st.caption("Interactive Risk Predictions & Historical Water Intake Monitoring")
 
 col_map, col_chart = st.columns([1.3, 1])
 
-# Column 1: UK Catchments Overview Map
 with col_map:
     st.subheader(f"Catchment Risk Levels ({selected_month})")
     st.caption("💡 *Click any catchment marker on the map to inspect its trend.*")
@@ -347,7 +395,6 @@ with col_map:
                 st.session_state["selected_site"] = clicked_site
                 st.rerun()
 
-# Column 2: Historical Trend Line Chart
 with col_chart:
     st.subheader(f"Site Risk Inspector: {selected_site}")
 
@@ -416,7 +463,6 @@ site_csos, river_lons, river_lats = get_site_spatial_data(
 if river_lons or not site_csos.empty:
     fig_cso_map = go.Figure()
 
-    # 1. River Reach Lines
     if river_lons:
         fig_cso_map.add_trace(
             ScatterMapTrace(
@@ -429,7 +475,6 @@ if river_lons or not site_csos.empty:
             )
         )
 
-    # 2. CSO Markers Grouped by Impact
     cso_color_map = {
         "Red (High Impact)": "#E63946",
         "Amber (Moderate Impact)": "#FFB703",
@@ -460,7 +505,7 @@ if river_lons or not site_csos.empty:
                         + df_group["company"].astype(str)
                         + "<br>"
                         + "CSO ID: "
-                        + df_group["canonical_cso_id"]
+                        + df_group["canonical_cso_id"].astype(str)
                         + "<br>"
                         + "Gain Contribution: "
                         + df_group["Gain_Percent"].round(3).astype(str)
@@ -470,7 +515,6 @@ if river_lons or not site_csos.empty:
                 )
             )
 
-    # Determine Map Center
     if not site_csos.empty:
         c_lat, c_lon = site_csos["lat"].mean(), site_csos["lon"].mean()
     elif river_lats:
