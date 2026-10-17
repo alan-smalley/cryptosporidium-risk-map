@@ -1,4 +1,5 @@
 import sqlite3
+import numpy as np
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
@@ -304,6 +305,42 @@ def get_site_spatial_data(site_name, amber_thresh=0.5, red_thresh=2.0):
     return site_csos, river_lons, river_lats
 
 
+def calculate_map_center_and_zoom(lats, lons):
+    """Calculates center lat/lon and appropriate zoom level to fit all network elements initially."""
+    valid_lats = [la for la in lats if la is not None and not np.isnan(la)]
+    valid_lons = [lo for lo in lons if lo is not None and not np.isnan(lo)]
+
+    if not valid_lats or not valid_lons:
+        return 55.0, -3.5, 9.5
+
+    min_lat, max_lat = min(valid_lats), max(valid_lats)
+    min_lon, max_lon = min(valid_lons), max(valid_lons)
+
+    center_lat = (min_lat + max_lat) / 2.0
+    center_lon = (min_lon + max_lon) / 2.0
+
+    max_diff = max(max_lat - min_lat, max_lon - min_lon)
+
+    if max_diff < 0.02:
+        zoom = 13.0
+    elif max_diff < 0.05:
+        zoom = 12.0
+    elif max_diff < 0.1:
+        zoom = 11.0
+    elif max_diff < 0.2:
+        zoom = 10.0
+    elif max_diff < 0.4:
+        zoom = 9.2
+    elif max_diff < 0.8:
+        zoom = 8.5
+    elif max_diff < 1.5:
+        zoom = 7.5
+    else:
+        zoom = 6.5
+
+    return center_lat, center_lon, zoom
+
+
 df = load_and_prepare_data()
 
 # Filter sites if a custom list is defined
@@ -354,9 +391,9 @@ high_count = (latest_df["predicted_risk_level"] == "High").sum()
 med_count = (latest_df["predicted_risk_level"] == "Medium").sum()
 low_count = (latest_df["predicted_risk_level"] == "Low").sum()
 
-st.sidebar.write(f"🔴 **High Risk:** {high_count}")
-st.sidebar.write(f"🟡 **Medium Risk:** {med_count}")
-st.sidebar.write(f"🟢 **Low Risk:** {low_count}")
+st.sidebar.markdown(f"🔴 **High Risk:** {high_count}  \n*(>0.50 oocysts/L)*\n")
+st.sidebar.markdown(f"🟡 **Medium Risk:** {med_count}  \n*(0.25 - 0.50 oocysts/L)*\n")
+st.sidebar.markdown(f"🟢 **Low Risk:** {low_count}  \n*(<0.25 oocysts/L)*\n")
 
 st.sidebar.divider()
 st.sidebar.markdown("### CSO & Map Settings")
@@ -394,42 +431,27 @@ with col_map:
     st.subheader(f"Catchment Risk Levels ({selected_month})")
     st.caption("💡 *Click any catchment marker on the map or select from the sidebar.*")
 
-    risk_label_map = {
-        "High": "High Risk (> 0.50 oocysts/L)",
-        "Medium": "Medium Risk (0.25 – 0.50 oocysts/L)",
-        "Low": "Low Risk (< 0.25 oocysts/L)",
-        "No Data": "No Data",
-    }
-    latest_df["risk_display_level"] = latest_df["predicted_risk_level"].map(
-        risk_label_map
-    ).fillna("No Data")
-
     risk_color_map = {
-        "High Risk (> 0.50 oocysts/L)": "#E63946",
-        "Medium Risk (0.25 – 0.50 oocysts/L)": "#FFB703",
-        "Low Risk (< 0.25 oocysts/L)": "#2A9D8F",
+        "High": "#E63946",
+        "Medium": "#FFB703",
+        "Low": "#2A9D8F",
         "No Data": "#94A3B8",
     }
 
-    category_order = [
-        "High Risk (> 0.50 oocysts/L)",
-        "Medium Risk (0.25 – 0.50 oocysts/L)",
-        "Low Risk (< 0.25 oocysts/L)",
-        "No Data",
-    ]
+    category_order = ["High", "Medium", "Low", "No Data"]
 
     if hasattr(px, "scatter_map"):
         fig_map = px.scatter_map(
             latest_df,
             lat="lat",
             lon="lon",
-            color="risk_display_level",
+            color="predicted_risk_level",
             color_discrete_map=risk_color_map,
-            category_orders={"risk_display_level": category_order},
+            category_orders={"predicted_risk_level": category_order},
             hover_name="Site",
             custom_data=["Site"],
             hover_data={
-                "risk_display_level": True,
+                "predicted_risk_level": True,
                 "predicted_risk": ":.4f",
                 "lat": False,
                 "lon": False,
@@ -443,13 +465,13 @@ with col_map:
             latest_df,
             lat="lat",
             lon="lon",
-            color="risk_display_level",
+            color="predicted_risk_level",
             color_discrete_map=risk_color_map,
-            category_orders={"risk_display_level": category_order},
+            category_orders={"predicted_risk_level": category_order},
             hover_name="Site",
             custom_data=["Site"],
             hover_data={
-                "risk_display_level": True,
+                "predicted_risk_level": True,
                 "predicted_risk": ":.4f",
                 "lat": False,
                 "lon": False,
@@ -478,10 +500,11 @@ with col_map:
             )
         )
 
+    # Removed UK map legend to enlarge graph viewing area
     fig_map.update_layout(
         height=680,
+        showlegend=False,
         margin={"r": 0, "t": 0, "l": 0, "b": 0},
-        legend_title_text="Predicted Risk Thresholds",
     )
 
     map_event = st.plotly_chart(
@@ -667,7 +690,7 @@ with col_chart:
 st.divider()
 st.subheader(f"🌊 Upstream Catchment Network & Contributing CSOs: {selected_site}")
 st.caption(
-    "Compact spatial view showing the intake location, upstream river channels, and High/Medium impact Combined Sewer Overflows (CSOs)."
+    "Interactive spatial view showing the intake location, upstream river channels, and High/Medium impact Combined Sewer Overflows (CSOs)."
 )
 
 site_csos, river_lons, river_lats = get_site_spatial_data(
@@ -698,6 +721,7 @@ if river_lons or not high_med_csos.empty:
 
     # B. Target Intake Location
     selected_row = latest_df[latest_df["Site"] == selected_site]
+    intake_lat, intake_lon = None, None
     if not selected_row.empty:
         intake_lat = selected_row["lat"].values[0]
         intake_lon = selected_row["lon"].values[0]
@@ -757,27 +781,29 @@ if river_lons or not high_med_csos.empty:
                 )
             )
 
+    # Collect all coordinates to calculate initial bounding box
+    all_lats = list(river_lats)
+    all_lons = list(river_lons)
     if not high_med_csos.empty:
-        c_lat, c_lon = high_med_csos["lat"].mean(), high_med_csos["lon"].mean()
-    elif river_lats:
-        valid_lats = [la for la in river_lats if la is not None]
-        valid_lons = [lo for lo in river_lons if lo is not None]
-        c_lat = sum(valid_lats) / len(valid_lats)
-        c_lon = sum(valid_lons) / len(valid_lons)
-    else:
-        c_lat, c_lon = 55.0, -3.5
+        all_lats.extend(high_med_csos["lat"].tolist())
+        all_lons.extend(high_med_csos["lon"].tolist())
+    if intake_lat is not None:
+        all_lats.append(intake_lat)
+        all_lons.append(intake_lon)
+
+    c_lat, c_lon, initial_zoom = calculate_map_center_and_zoom(all_lats, all_lons)
 
     map_config = {
         "style": base_map_style,
         "center": dict(lat=c_lat, lon=c_lon),
-        "zoom": 10,
+        "zoom": initial_zoom,
     }
 
+    # Zoomable layout settings with initial auto-fit view
     layout_kwargs = {
         MAP_DICT_KEY: map_config,
         "margin": dict(l=0, r=0, t=0, b=0),
-        "height": 380,
-        "dragmode": False,
+        "height": 420,
         "legend": dict(
             yanchor="top",
             y=0.98,
@@ -789,13 +815,13 @@ if river_lons or not high_med_csos.empty:
 
     fig_cso_map.update_layout(**layout_kwargs)
 
+    # Re-enable zoom and pan
     st.plotly_chart(
         fig_cso_map,
         use_container_width=True,
         config={
-            "scrollZoom": False,
-            "doubleClick": False,
-            "displayModeBar": False,
+            "scrollZoom": True,
+            "displayModeBar": True,
         },
     )
 
