@@ -18,12 +18,8 @@ else:
 # ---------------------------------------------------------
 # Site Selection & Initial Load Configuration
 # ---------------------------------------------------------
-# Default site that loads first when opening the portal
 INITIAL_SITE = "River_Thames_Laleham"
 
-# Toggle custom filtering:
-# Set to True to restrict the app to SITES_TO_DISPLAY.
-# Set to False to display ALL available sites in the dataset.
 ENABLE_CUSTOM_SITE_FILTER = False
 
 SITES_TO_DISPLAY = [
@@ -220,8 +216,16 @@ def get_site_spatial_data(site_name, amber_thresh=0.5, red_thresh=2.0):
     site_csos = pd.DataFrame()
     try:
         conn_cso = sqlite3.connect("riversage_52_catchments__cso_sites.gpkg")
+        
+        sample_df = pd.read_sql_query(
+            "SELECT * FROM riversage_52_catchments__cso_sites LIMIT 1", conn_cso
+        )
+        cso_cols = ["canonical_cso_id", "company", "canonical_name", "canonical_easting", "canonical_northing"]
+        if "permit_number" in sample_df.columns:
+            cso_cols.append("permit_number")
+
         cso_df = pd.read_sql_query(
-            "SELECT canonical_cso_id, company, canonical_name, canonical_easting, canonical_northing FROM riversage_52_catchments__cso_sites",
+            f"SELECT {', '.join(cso_cols)} FROM riversage_52_catchments__cso_sites",
             conn_cso,
         )
         conn_cso.close()
@@ -384,13 +388,12 @@ with st.sidebar.expander("ℹ️ Portal Disclaimer & Risk Definitions"):
 st.title("UK Cryptosporidium Catchment Risk Portal")
 st.caption("Interactive Risk Predictions & Historical Water Intake Monitoring")
 
-col_map, col_chart = st.columns([1.3, 1])
+col_map, col_chart = st.columns([2.2, 1])
 
 with col_map:
     st.subheader(f"Catchment Risk Levels ({selected_month})")
     st.caption("💡 *Click any catchment marker on the map or select from the sidebar.*")
 
-    # Map risk levels to descriptive labels including concentration thresholds
     risk_label_map = {
         "High": "High Risk (> 0.50 oocysts/L)",
         "Medium": "Medium Risk (0.25 – 0.50 oocysts/L)",
@@ -431,8 +434,8 @@ with col_map:
                 "lat": False,
                 "lon": False,
             },
-            zoom=5,
-            center={"lat": 55.0, "lon": -3.5},
+            zoom=5.2,
+            center={"lat": 54.5, "lon": -3.0},
             map_style=base_map_style,
         )
     else:
@@ -451,13 +454,13 @@ with col_map:
                 "lat": False,
                 "lon": False,
             },
-            zoom=5,
-            center={"lat": 55.0, "lon": -3.5},
+            zoom=5.2,
+            center={"lat": 54.5, "lon": -3.0},
             mapbox_style=base_map_style,
         )
 
     fig_map.update_traces(
-        marker={"size": 13, "opacity": 0.85},
+        marker={"size": 14, "opacity": 0.85},
         unselected={"marker": {"opacity": 0.85}},
         selected={"marker": {"opacity": 0.85}},
     )
@@ -469,13 +472,14 @@ with col_map:
                 lat=selected_row["lat"],
                 lon=selected_row["lon"],
                 mode="markers",
-                marker=dict(size=5, color="black"),
+                marker=dict(size=6, color="black"),
                 hoverinfo="skip",
                 showlegend=False,
             )
         )
 
     fig_map.update_layout(
+        height=680,
         margin={"r": 0, "t": 0, "l": 0, "b": 0},
         legend_title_text="Predicted Risk Thresholds",
     )
@@ -499,7 +503,6 @@ with col_map:
 with col_chart:
     st.subheader(f"Site Risk Inspector: {selected_site}")
 
-    # Graph Display Mode Toggle (Heatmap default)
     graph_type = st.radio(
         "Select Graph Display Mode:",
         ["Heatmap (Risk Levels)", "Line Chart (Concentrations)"],
@@ -535,7 +538,6 @@ with col_chart:
                 else:
                     use_manual_y = False
 
-    # Render selected graph type
     if graph_type == "Heatmap (Risk Levels)":
         risk_num_map = {"No Data": 0, "Low": 1, "Medium": 2, "High": 3}
         x_months = site_df["YearMonth"].tolist()
@@ -565,13 +567,13 @@ with col_chart:
 
         discrete_colorscale = [
             [0.00, "#94A3B8"],
-            [0.25, "#94A3B8"],  # No Data (Grey)
+            [0.25, "#94A3B8"],
             [0.25, "#2A9D8F"],
-            [0.50, "#2A9D8F"],  # Low Risk (Green)
+            [0.50, "#2A9D8F"],
             [0.50, "#FFB703"],
-            [0.75, "#FFB703"],  # Medium Risk (Amber)
+            [0.75, "#FFB703"],
             [0.75, "#E63946"],
-            [1.00, "#E63946"],  # High Risk (Red)
+            [1.00, "#E63946"],
         ]
 
         fig_chart = go.Figure(
@@ -598,12 +600,11 @@ with col_chart:
             yaxis=dict(autorange="reversed"),
             template="plotly_white",
             height=300,
-            showlegend=False,  # Legend removed for heatmap
+            showlegend=False,
             margin=dict(t=60, b=50, l=20, r=20),
         )
 
     else:
-        # Line Chart (Concentrations)
         fig_chart = go.Figure()
         fig_chart.add_trace(
             go.Scatter(
@@ -664,72 +665,100 @@ with col_chart:
 # 6. Upstream River Network & CSO Spatial Inspector
 # ---------------------------------------------------------
 st.divider()
-st.subheader(f"🌊 Upstream Catchment & CSO Network: {selected_site}")
+st.subheader(f"🌊 Upstream Catchment Network & Contributing CSOs: {selected_site}")
 st.caption(
-    "Interactive spatial tracing of river reaches and contributing Combined Sewer Overflows (CSOs) styled by XGBoost model gain contribution."
+    "Compact spatial view showing the intake location, upstream river channels, and High/Medium impact Combined Sewer Overflows (CSOs)."
 )
 
 site_csos, river_lons, river_lats = get_site_spatial_data(
     selected_site, amber_thresh=amber_thresh, red_thresh=red_thresh
 )
 
-if river_lons or not site_csos.empty:
+# Filter site_csos to show BOTH High (red) AND Medium (amber) Impact CSOs (>= amber_thresh)
+if not site_csos.empty:
+    high_med_csos = site_csos[site_csos["Gain_Percent"] >= amber_thresh].copy()
+else:
+    high_med_csos = pd.DataFrame()
+
+if river_lons or not high_med_csos.empty:
     fig_cso_map = go.Figure()
 
+    # A. Upstream River Reach Vectors
     if river_lons:
         fig_cso_map.add_trace(
             ScatterMapTrace(
                 lon=river_lons,
                 lat=river_lats,
                 mode="lines",
-                line=dict(width=2, color="#1D3557"),
+                line=dict(width=2.5, color="#1D3557"),
                 name="Upstream River Network",
                 hoverinfo="none",
             )
         )
 
+    # B. Target Intake Location
+    selected_row = latest_df[latest_df["Site"] == selected_site]
+    if not selected_row.empty:
+        intake_lat = selected_row["lat"].values[0]
+        intake_lon = selected_row["lon"].values[0]
+        fig_cso_map.add_trace(
+            ScatterMapTrace(
+                lon=[intake_lon],
+                lat=[intake_lat],
+                mode="markers",
+                marker=dict(size=14, color="#1D3557"),
+                name="Water Intake",
+                text=f"<b>Target Intake:</b> {selected_site}",
+                hoverinfo="text",
+            )
+        )
+
+    # C. High & Medium Impact CSOs with Permit Number displayed on hover
     cso_color_map = {
         "Red (High Impact)": "#E63946",
         "Amber (Moderate Impact)": "#FFB703",
-        "Grey (Low/None)": "#8D99AE",
     }
 
-    if not site_csos.empty:
-        for level, df_group in site_csos.groupby("Impact_Level"):
+    if not high_med_csos.empty:
+        for level, df_group in high_med_csos.groupby("Impact_Level"):
+            permit_ids = (
+                df_group["permit_number"].astype(str)
+                if "permit_number" in df_group.columns
+                else df_group["canonical_cso_id"].astype(str)
+            )
+
+            hover_txt = (
+                "<b>Permit No / CSO ID: "
+                + permit_ids
+                + "</b><br>"
+                + "Name: "
+                + df_group["canonical_name"].astype(str)
+                + "<br>"
+                + "Company: "
+                + df_group["company"].astype(str)
+                + "<br>"
+                + "Model Gain Impact: "
+                + df_group["Gain_Percent"].round(3).astype(str)
+                + "%"
+            )
+
             fig_cso_map.add_trace(
                 ScatterMapTrace(
                     lon=df_group["lon"],
                     lat=df_group["lat"],
                     mode="markers",
                     marker=dict(
-                        size=(
-                            13
-                            if "High" in level
-                            else (10 if "Moderate" in level else 7)
-                        ),
-                        color=cso_color_map.get(level, "#8D99AE"),
+                        size=13 if "High" in level else 10,
+                        color=cso_color_map.get(level, "#FFB703"),
                     ),
                     name=level,
-                    text=(
-                        "<b>"
-                        + df_group["canonical_name"]
-                        + "</b><br>"
-                        + "Company: "
-                        + df_group["company"].astype(str)
-                        + "<br>"
-                        + "CSO ID: "
-                        + df_group["canonical_cso_id"].astype(str)
-                        + "<br>"
-                        + "Gain Contribution: "
-                        + df_group["Gain_Percent"].round(3).astype(str)
-                        + "%"
-                    ),
+                    text=hover_txt,
                     hoverinfo="text",
                 )
             )
 
-    if not site_csos.empty:
-        c_lat, c_lon = site_csos["lat"].mean(), site_csos["lon"].mean()
+    if not high_med_csos.empty:
+        c_lat, c_lon = high_med_csos["lat"].mean(), high_med_csos["lon"].mean()
     elif river_lats:
         valid_lats = [la for la in river_lats if la is not None]
         valid_lons = [lo for lo in river_lons if lo is not None]
@@ -747,7 +776,8 @@ if river_lons or not site_csos.empty:
     layout_kwargs = {
         MAP_DICT_KEY: map_config,
         "margin": dict(l=0, r=0, t=0, b=0),
-        "height": 550,
+        "height": 380,
+        "dragmode": False,
         "legend": dict(
             yanchor="top",
             y=0.98,
@@ -759,11 +789,19 @@ if river_lons or not site_csos.empty:
 
     fig_cso_map.update_layout(**layout_kwargs)
 
-    st.plotly_chart(fig_cso_map, use_container_width=True)
+    st.plotly_chart(
+        fig_cso_map,
+        use_container_width=True,
+        config={
+            "scrollZoom": False,
+            "doubleClick": False,
+            "displayModeBar": False,
+        },
+    )
 
-    if not site_csos.empty:
-        with st.expander("📋 View Contributing CSO Feature Breakdown"):
-            cso_display = site_csos[
+    if not high_med_csos.empty:
+        with st.expander("📋 View Contributing High & Medium Impact CSO Breakdown"):
+            cso_display = high_med_csos[
                 [
                     "canonical_cso_id",
                     "canonical_name",
@@ -773,7 +811,7 @@ if river_lons or not site_csos.empty:
                 ]
             ].sort_values("Gain_Percent", ascending=False)
             cso_display.columns = [
-                "CSO ID",
+                "Permit / CSO ID",
                 "CSO Station Name",
                 "Water Company",
                 "Model Gain %",
@@ -782,7 +820,7 @@ if river_lons or not site_csos.empty:
             st.dataframe(cso_display, use_container_width=True)
     else:
         st.info(
-            f"ℹ️ Upstream river channels displayed. No upstream CSOs identified for intake site: **{selected_site}**."
+            f"ℹ️ Upstream river channels displayed. No high or medium impact CSOs (≥ {amber_thresh}% gain) identified for intake site: **{selected_site}**."
         )
 else:
     st.info(
