@@ -192,9 +192,10 @@ def normalize_name(s):
 
 @st.cache_data
 def load_catchment_polygons(site_names):
-    """Loads catchment boundary polygons from GPKG databases or builds smooth network envelopes."""
+    """Loads and simplifies catchment boundary polygons to prevent high-payload WebSocket errors."""
     features = []
     norm_map = {normalize_name(s): s for s in site_names}
+    processed_sites = set()
 
     gpkg_candidates = [
         "riversage_52_catchments__boundaries.gpkg",
@@ -235,55 +236,66 @@ def load_catchment_polygons(site_names):
                             for _, row in df_geom.iterrows():
                                 raw_site = row[site_col]
                                 norm_s = normalize_name(raw_site)
-                                canonical_site = norm_map.get(norm_s, raw_site)
 
-                                geom_blob = row["geom"]
-                                if geom_blob:
-                                    geom = parse_gpkg_geom(geom_blob)
-                                    if geom:
-                                        geom_wgs84 = ops.transform(
-                                            transformer.transform, geom
-                                        )
-
-                                        # Catchment boundary polygon
-                                        if geom_wgs84.geom_type in [
-                                            "Polygon",
-                                            "MultiPolygon",
-                                        ]:
-                                            features.append(
-                                                {
-                                                    "type": "Feature",
-                                                    "id": canonical_site,
-                                                    "properties": {
-                                                        "Site": canonical_site
-                                                    },
-                                                    "geometry": mapping(
-                                                        geom_wgs84
-                                                    ),
-                                                }
+                                if norm_s in norm_map and norm_s not in processed_sites:
+                                    canonical_site = norm_map[norm_s]
+                                    geom_blob = row["geom"]
+                                    if geom_blob:
+                                        geom = parse_gpkg_geom(geom_blob)
+                                        if geom:
+                                            geom_wgs84 = ops.transform(
+                                                transformer.transform, geom
                                             )
-                                        # River network vector envelope
-                                        elif geom_wgs84.geom_type in [
-                                            "LineString",
-                                            "MultiLineString",
-                                        ]:
-                                            envelope = (
-                                                geom_wgs84.convex_hull.buffer(
-                                                    0.012
+
+                                            # Polygon geometry
+                                            if geom_wgs84.geom_type in [
+                                                "Polygon",
+                                                "MultiPolygon",
+                                            ]:
+                                                # Simplify polygon vertices for low payload size
+                                                geom_simple = geom_wgs84.simplify(
+                                                    0.0008, preserve_topology=True
                                                 )
-                                            )
-                                            features.append(
-                                                {
-                                                    "type": "Feature",
-                                                    "id": canonical_site,
-                                                    "properties": {
-                                                        "Site": canonical_site
-                                                    },
-                                                    "geometry": mapping(
-                                                        envelope
-                                                    ),
-                                                }
-                                            )
+                                                features.append(
+                                                    {
+                                                        "type": "Feature",
+                                                        "id": canonical_site,
+                                                        "properties": {
+                                                            "Site": canonical_site
+                                                        },
+                                                        "geometry": mapping(
+                                                            geom_simple
+                                                        ),
+                                                    }
+                                                )
+                                                processed_sites.add(norm_s)
+
+                                            # Line network geometry envelope
+                                            elif geom_wgs84.geom_type in [
+                                                "LineString",
+                                                "MultiLineString",
+                                            ]:
+                                                envelope = (
+                                                    geom_wgs84.convex_hull.buffer(
+                                                        0.012
+                                                    ).simplify(
+                                                        0.0008,
+                                                        preserve_topology=True,
+                                                    )
+                                                )
+                                                features.append(
+                                                    {
+                                                        "type": "Feature",
+                                                        "id": canonical_site,
+                                                        "properties": {
+                                                            "Site": canonical_site
+                                                        },
+                                                        "geometry": mapping(
+                                                            envelope
+                                                        ),
+                                                    }
+                                                )
+                                                processed_sites.add(norm_s)
                 conn.close()
             except Exception:
                 pass
@@ -571,11 +583,10 @@ with col_map:
 
     category_order = ["High", "Medium", "Low", "No Data"]
 
-    # Load catchment area polygons
+    # Load simplified catchment area polygons
     catchment_geojson = load_catchment_polygons(site_list)
 
     if catchment_geojson and len(catchment_geojson["features"]) > 0:
-        # Choropleth catchment area polygons
         if hasattr(px, "choropleth_map"):
             fig_map = px.choropleth_map(
                 latest_df,
@@ -999,7 +1010,6 @@ if river_lons or not high_med_csos.empty:
 
     fig_cso_map.update_layout(**layout_kwargs)
 
-    # Re-enable zoom and pan
     st.plotly_chart(
         fig_cso_map,
         use_container_width=True,
