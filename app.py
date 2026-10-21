@@ -125,13 +125,6 @@ transformer = pyproj.Transformer.from_crs(
     "EPSG:27700", "EPSG:4326", always_xy=True
 )
 
-if st.sidebar.button("Reload Data"):
-    st.session_state.clear()
-    st.cache_data.clear()
-    st.rerun()
-
-st.sidebar.divider()
-
 # ---------------------------------------------------------
 # 3. Secure Data Loading & Helper Functions
 # ---------------------------------------------------------
@@ -469,52 +462,85 @@ if (
         st.session_state["selected_site"] = site_list[0]
 
 # ---------------------------------------------------------
-# 4. Sidebar Controls & Metrics
+# 4. Compressed Sidebar Controls & Metrics
 # ---------------------------------------------------------
-st.sidebar.title("Navigation & Filters")
+st.sidebar.markdown("### Navigation & Controls")
 
-# Site Selectbox Sync
+# A. Site Selectbox & Prev/Next Clicker Buttons
 site_idx = site_list.index(st.session_state["selected_site"])
 chosen_site = st.sidebar.selectbox(
-    "Select Target Intake Site:", site_list, index=site_idx
+    "Target Intake Site:", site_list, index=site_idx
 )
 if chosen_site != st.session_state["selected_site"]:
     st.session_state["selected_site"] = chosen_site
     st.rerun()
 
+col_sprev, col_snext = st.sidebar.columns(2)
+if col_sprev.button("◀ Prev Site", key="btn_prev_site", use_container_width=True):
+    new_site_idx = (site_idx - 1) % len(site_list)
+    st.session_state["selected_site"] = site_list[new_site_idx]
+    st.rerun()
+
+if col_snext.button("Next Site ▶", key="btn_next_site", use_container_width=True):
+    new_site_idx = (site_idx + 1) % len(site_list)
+    st.session_state["selected_site"] = site_list[new_site_idx]
+    st.rerun()
+
 selected_site = st.session_state["selected_site"]
 
 filtered_df = df[df["Site"].isin(site_list)].copy()
-
 available_months = sorted(filtered_df["YearMonth"].unique(), reverse=True)
-selected_month = st.sidebar.selectbox(
-    "Select Model Calendar Month:", available_months
-)
 
+if (
+    "selected_month" not in st.session_state
+    or st.session_state["selected_month"] not in available_months
+):
+    st.session_state["selected_month"] = available_months[0]
+
+# B. Month Selectbox & Prev/Next Clicker Buttons
+current_month = st.session_state["selected_month"]
+month_idx = available_months.index(current_month)
+
+chosen_month = st.sidebar.selectbox(
+    "Model Calendar Month:", available_months, index=month_idx
+)
+if chosen_month != st.session_state["selected_month"]:
+    st.session_state["selected_month"] = chosen_month
+    st.rerun()
+
+col_mprev, col_mnext = st.sidebar.columns(2)
+if col_mprev.button("◀ Prev Month", key="btn_prev_month", use_container_width=True):
+    new_m_idx = (month_idx + 1) % len(available_months)
+    st.session_state["selected_month"] = available_months[new_m_idx]
+    st.rerun()
+
+if col_mnext.button("Next Month ▶", key="btn_next_month", use_container_width=True):
+    new_m_idx = (month_idx - 1) % len(available_months)
+    st.session_state["selected_month"] = available_months[new_m_idx]
+    st.rerun()
+
+selected_month = st.session_state["selected_month"]
 latest_df = filtered_df[filtered_df["YearMonth"] == selected_month].copy()
 
-st.sidebar.divider()
-st.sidebar.markdown(f"### Summary for **{selected_month}**")
-st.sidebar.metric("Total Active Sites", len(latest_df))
-
+# C. Compact Summary Metrics
 high_count = (latest_df["predicted_risk_level"] == "High").sum()
 med_count = (latest_df["predicted_risk_level"] == "Medium").sum()
 low_count = (latest_df["predicted_risk_level"] == "Low").sum()
 
-st.sidebar.markdown(f"🔴 **High Risk:** {high_count}  \n*(>0.50 oocysts/L)*\n")
+st.sidebar.markdown(f"**Summary ({selected_month}):** {len(latest_df)} Active Sites")
 st.sidebar.markdown(
-    f"🟡 **Medium Risk:** {med_count}  \n*(0.25 - 0.50 oocysts/L)*\n"
+    f"🔴 **High:** {high_count} *(>0.50)* &nbsp;|&nbsp; "
+    f"🟡 **Med:** {med_count} *(0.25-0.5)* &nbsp;|&nbsp; "
+    f"🟢 **Low:** {low_count} *(<0.25)*"
 )
-st.sidebar.markdown(f"🟢 **Low Risk:** {low_count}  \n*(<0.25 oocysts/L)*\n")
 
-st.sidebar.divider()
-st.sidebar.markdown("### CSO & Map Settings")
-
-# Map View Selection (Catchment Polygons vs Intake Markers)
+# D. Map Display Mode & Controls
+st.sidebar.markdown("**Map Display Mode**")
 map_view_mode = st.sidebar.radio(
     "Map View Mode:",
     ["Catchment Polygons", "Intake Point Markers"],
     index=0,
+    label_visibility="collapsed",
 )
 
 amber_thresh = st.sidebar.slider(
@@ -525,12 +551,16 @@ red_thresh = st.sidebar.slider(
 )
 
 show_terrain = st.sidebar.checkbox(
-    "Enable Terrain / Topo Map Background", value=False
+    "Enable Topo Map Background", value=False
 )
 base_map_style = "open-street-map" if show_terrain else "carto-positron"
 
-st.sidebar.divider()
-with st.sidebar.expander("ℹ️ Portal Disclaimer & Risk Definitions"):
+if st.sidebar.button("Reload App Data", use_container_width=True):
+    st.session_state.clear()
+    st.cache_data.clear()
+    st.rerun()
+
+with st.sidebar.expander("ℹ️ Portal Disclaimer & Thresholds"):
     st.warning(
         "**Trial Version:** Values are hypothetical and for demonstration purposes only."
     )
@@ -547,7 +577,8 @@ with st.sidebar.expander("ℹ️ Portal Disclaimer & Risk Definitions"):
 st.title("UK Cryptosporidium Catchment Risk Portal")
 st.caption("Interactive Risk Predictions & Historical Water Intake Monitoring")
 
-col_map, col_chart = st.columns([2.2, 1])
+# Adjusted column ratio to shift map left and widen the right inspector column
+col_map, col_chart = st.columns([1.5, 1.0])
 
 with col_map:
     st.subheader(f"Catchment Risk Levels ({selected_month})")
@@ -809,33 +840,27 @@ with col_chart:
 
     # --- Chart Settings / Range Filter Expander ---
     with st.expander("⚙️ Chart Range Settings"):
-        col_opt1, col_opt2 = st.columns(2)
+        use_manual_x = st.checkbox(
+            "Override Date Range (X-Axis)", value=False
+        )
+        if use_manual_x:
+            cx1, cx2 = st.columns(2)
+            x_min = cx1.text_input("Start Month (YYYY-MM)", value="2018-01")
+            x_max = cx2.text_input("End Month (YYYY-MM)", value="2023-12")
+            if x_min and x_max:
+                site_df = site_df[
+                    (site_df["YearMonth"] >= x_min)
+                    & (site_df["YearMonth"] <= x_max)
+                ]
 
-        with col_opt1:
-            use_manual_x = st.checkbox(
-                "Override Date Range (X-Axis)", value=False
-            )
-            if use_manual_x:
-                cx1, cx2 = st.columns(2)
-                x_min = cx1.text_input("Start Month", value="2018-01")
-                x_max = cx2.text_input("End Month", value="2023-12")
-                if x_min and x_max:
-                    site_df = site_df[
-                        (site_df["YearMonth"] >= x_min)
-                        & (site_df["YearMonth"] <= x_max)
-                    ]
-
-        with col_opt2:
-            if graph_type == "Line Chart (Concentrations)":
-                use_manual_y = st.checkbox(
-                    "Override Y-Axis Range", value=False
-                )
-                if use_manual_y:
-                    cy1, cy2 = st.columns(2)
-                    y_min = cy1.number_input("Y Min", value=0.0, step=0.05)
-                    y_max = cy2.number_input("Y Max", value=1.0, step=0.1)
-                else:
-                    use_manual_y = False
+        if graph_type == "Line Chart (Concentrations)":
+            use_manual_y = st.checkbox("Override Y-Axis Range", value=False)
+            if use_manual_y:
+                cy1, cy2 = st.columns(2)
+                y_min = cy1.number_input("Y Min", value=0.0, step=0.05)
+                y_max = cy2.number_input("Y Max", value=1.0, step=0.1)
+            else:
+                use_manual_y = False
 
     if graph_type == "Heatmap (Risk Levels)":
         risk_num_map = {"No Data": 0, "Low": 1, "Medium": 2, "High": 3}
