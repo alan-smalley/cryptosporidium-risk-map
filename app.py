@@ -8,7 +8,7 @@ import pyproj
 import re
 import streamlit as st
 from shapely import ops, wkb
-from shapely.geometry import Point, mapping
+from shapely.geometry import Point, mapping, GeometryCollection
 
 # Detect Plotly version capabilities for map traces
 if hasattr(go, "Scattermap"):
@@ -192,10 +192,9 @@ def normalize_name(s):
 
 @st.cache_data
 def load_catchment_polygons(site_meta_df):
-    """Generates full regional catchment basin polygons for all intake sites."""
+    """Generates detailed, organic catchment area polygons layered from largest to smallest."""
     features = []
-    
-    # Map normalized site names to canonical names and intake coordinates
+
     site_dict = {}
     for _, row in site_meta_df.iterrows():
         s_name = row["Site"]
@@ -207,7 +206,7 @@ def load_catchment_polygons(site_meta_df):
                 "northings": row.get("Northings", None),
             }
 
-    # A. Load OSGB river reach network geometries from GPKG
+    # Load OSGB upstream river reach geometries
     site_osgb_geoms = {}
     gpkg_net_file = "riversage_52_catchments__upstream_networks.gpkg"
     if os.path.exists(gpkg_net_file):
@@ -232,44 +231,58 @@ def load_catchment_polygons(site_meta_df):
         except Exception:
             pass
 
-    # B. Build full catchment area polygons
+    # Build organic catchment basin polygons
     for norm_s, s_info in site_dict.items():
         canonical_name = s_info["canonical_name"]
         catchment_osgb = None
 
         if norm_s in site_osgb_geoms and len(site_osgb_geoms[norm_s]) > 0:
-            # Combine all upstream river lines for this catchment
-            from shapely.geometry import GeometryCollection
             all_reaches = GeometryCollection(site_osgb_geoms[norm_s])
-            
-            # Convex hull + 1.5km catchment drainage buffer in meters
-            catchment_osgb = all_reaches.convex_hull.buffer(1500)
-        
-        # Fallback if no network vectors exist: 5km radius regional catchment zone around intake
-        if (catchment_osgb is None or catchment_osgb.is_empty) and s_info["eastings"] is not None:
+            # Organic buffer along actual river channels (2.2km buffer in OSGB meters)
+            catchment_osgb = all_reaches.buffer(2200)
+
+        # Fallback if no network vectors exist: smooth 4km catchment zone around intake
+        if (
+            catchment_osgb is None or catchment_osgb.is_empty
+        ) and s_info["eastings"] is not None:
             try:
-                intake_pt = Point(float(s_info["eastings"]), float(s_info["northings"]))
-                catchment_osgb = intake_pt.buffer(5000)  # 5km radius catchment area
+                intake_pt = Point(
+                    float(s_info["eastings"]), float(s_info["northings"])
+                )
+                catchment_osgb = intake_pt.buffer(4000)
             except Exception:
                 catchment_osgb = None
 
         if catchment_osgb and not catchment_osgb.is_empty:
+            area_sq_km = float(catchment_osgb.area / 1e6)
+
             # Transform OSGB meter coordinates to WGS84 lat/lon
-            catchment_wgs84 = ops.transform(transformer.transform, catchment_osgb)
-            
-            # Simplify polygon for web rendering performance
-            catchment_simple = catchment_wgs84.simplify(0.0005, preserve_topology=True)
+            catchment_wgs84 = ops.transform(
+                transformer.transform, catchment_osgb
+            )
+
+            # High-precision simplification (~10m precision for smooth curves)
+            catchment_simple = catchment_wgs84.simplify(
+                0.0001, preserve_topology=True
+            )
 
             features.append(
                 {
                     "type": "Feature",
                     "id": canonical_name,
-                    "properties": {"Site": canonical_name},
+                    "properties": {
+                        "Site": canonical_name,
+                        "area_sq_km": area_sq_km,
+                    },
                     "geometry": mapping(catchment_simple),
                 }
             )
 
     if features:
+        # Sort features DESCENDING by area (largest drawn first, smallest drawn last on top)
+        features.sort(
+            key=lambda f: f["properties"]["area_sq_km"], reverse=True
+        )
         return {"type": "FeatureCollection", "features": features}
     return None
 
@@ -557,6 +570,17 @@ with col_map:
     catchment_geojson = load_catchment_polygons(site_meta_unique)
 
     if catchment_geojson and len(catchment_geojson["features"]) > 0:
+        # Align latest_df sort order with GeoJSON area sorting (largest first, smallest on top)
+        geojson_site_order = [
+            f["properties"]["Site"] for f in catchment_geojson["features"]
+        ]
+        latest_df["site_sort_idx"] = latest_df["Site"].map(
+            lambda x: (
+                geojson_site_order.index(x) if x in geojson_site_order else 999
+            )
+        )
+        latest_df = latest_df.sort_values("site_sort_idx")
+
         if hasattr(px, "choropleth_map"):
             fig_map = px.choropleth_map(
                 latest_df,
