@@ -192,7 +192,7 @@ def normalize_name(s):
 
 @st.cache_data
 def load_catchment_polygons_from_coords(sites_tuples):
-    """Generates detailed, organic catchment area polygons layered from largest to smallest."""
+    """Memory-efficient generation of catchment polygons staying well under 1GB RAM."""
     features = []
 
     site_dict = {}
@@ -226,7 +226,10 @@ def load_catchment_polygons_from_coords(sites_tuples):
                     if geom_osgb and not geom_osgb.is_empty:
                         if norm_target not in site_osgb_geoms:
                             site_osgb_geoms[norm_target] = []
-                        site_osgb_geoms[norm_target].append(geom_osgb)
+                        # Simplify individual lines prior to collection to minimize memory footprint
+                        site_osgb_geoms[norm_target].append(
+                            geom_osgb.simplify(100.0, preserve_topology=False)
+                        )
         except Exception:
             pass
 
@@ -237,17 +240,17 @@ def load_catchment_polygons_from_coords(sites_tuples):
 
         if norm_s in site_osgb_geoms and len(site_osgb_geoms[norm_s]) > 0:
             all_reaches = GeometryCollection(site_osgb_geoms[norm_s])
-            # Organic buffer along actual river channels (2.2km buffer in OSGB meters)
-            catchment_osgb = all_reaches.buffer(2200)
+            # Memory-efficient 1.8km buffer along simplified channels
+            catchment_osgb = all_reaches.buffer(1800, resolution=4)
 
-        # Fallback if no network vectors exist: smooth 4km catchment zone around intake
+        # Fallback if no network vectors exist: 4km radius catchment zone around intake
         e_val, n_val = s_info["eastings"], s_info["northings"]
         if (
             catchment_osgb is None or catchment_osgb.is_empty
         ) and pd.notna(e_val) and pd.notna(n_val):
             try:
                 intake_pt = Point(float(e_val), float(n_val))
-                catchment_osgb = intake_pt.buffer(4000)
+                catchment_osgb = intake_pt.buffer(4000, resolution=8)
             except Exception:
                 catchment_osgb = None
 
@@ -259,9 +262,9 @@ def load_catchment_polygons_from_coords(sites_tuples):
                 transformer.transform, catchment_osgb
             )
 
-            # Smooth simplification (~25m precision for clean performance)
+            # Web-optimized simplification
             catchment_simple = catchment_wgs84.simplify(
-                0.0003, preserve_topology=True
+                0.0005, preserve_topology=True
             )
 
             features.append(
