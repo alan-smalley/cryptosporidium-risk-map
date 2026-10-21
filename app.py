@@ -191,19 +191,18 @@ def normalize_name(s):
 
 
 @st.cache_data
-def load_catchment_polygons(site_meta_df):
+def load_catchment_polygons_from_coords(sites_tuples):
     """Generates detailed, organic catchment area polygons layered from largest to smallest."""
     features = []
 
     site_dict = {}
-    for _, row in site_meta_df.iterrows():
-        s_name = row["Site"]
+    for s_name, e_val, n_val in sites_tuples:
         norm_s = normalize_name(s_name)
         if norm_s not in site_dict:
             site_dict[norm_s] = {
                 "canonical_name": s_name,
-                "eastings": row.get("Eastings", None),
-                "northings": row.get("Northings", None),
+                "eastings": e_val,
+                "northings": n_val,
             }
 
     # Load OSGB upstream river reach geometries
@@ -242,13 +241,12 @@ def load_catchment_polygons(site_meta_df):
             catchment_osgb = all_reaches.buffer(2200)
 
         # Fallback if no network vectors exist: smooth 4km catchment zone around intake
+        e_val, n_val = s_info["eastings"], s_info["northings"]
         if (
             catchment_osgb is None or catchment_osgb.is_empty
-        ) and s_info["eastings"] is not None:
+        ) and pd.notna(e_val) and pd.notna(n_val):
             try:
-                intake_pt = Point(
-                    float(s_info["eastings"]), float(s_info["northings"])
-                )
+                intake_pt = Point(float(e_val), float(n_val))
                 catchment_osgb = intake_pt.buffer(4000)
             except Exception:
                 catchment_osgb = None
@@ -261,9 +259,9 @@ def load_catchment_polygons(site_meta_df):
                 transformer.transform, catchment_osgb
             )
 
-            # High-precision simplification (~10m precision for smooth curves)
+            # Smooth simplification (~25m precision for clean performance)
             catchment_simple = catchment_wgs84.simplify(
-                0.0001, preserve_topology=True
+                0.0003, preserve_topology=True
             )
 
             features.append(
@@ -565,9 +563,18 @@ with col_map:
 
     category_order = ["High", "Medium", "Low", "No Data"]
 
-    # Load catchment area polygons
+    # Convert DataFrame rows to hashable tuples for caching
     site_meta_unique = latest_df.drop_duplicates(subset=["Site"])
-    catchment_geojson = load_catchment_polygons(site_meta_unique)
+    sites_tuples = tuple(
+        (
+            row["Site"],
+            row.get("Eastings", None),
+            row.get("Northings", None),
+        )
+        for _, row in site_meta_unique.iterrows()
+    )
+
+    catchment_geojson = load_catchment_polygons_from_coords(sites_tuples)
 
     if catchment_geojson and len(catchment_geojson["features"]) > 0:
         # Align latest_df sort order with GeoJSON area sorting (largest first, smallest on top)
@@ -581,44 +588,24 @@ with col_map:
         )
         latest_df = latest_df.sort_values("site_sort_idx")
 
-        if hasattr(px, "choropleth_map"):
-            fig_map = px.choropleth_map(
-                latest_df,
-                geojson=catchment_geojson,
-                locations="Site",
-                featureidkey="properties.Site",
-                color="predicted_risk_level",
-                color_discrete_map=risk_color_map,
-                category_orders={"predicted_risk_level": category_order},
-                hover_name="Site",
-                custom_data=["Site"],
-                hover_data={
-                    "predicted_risk_level": True,
-                    "predicted_risk": ":.4f",
-                },
-                zoom=5.2,
-                center={"lat": 54.5, "lon": -3.0},
-                map_style=base_map_style,
-            )
-        else:
-            fig_map = px.choropleth_mapbox(
-                latest_df,
-                geojson=catchment_geojson,
-                locations="Site",
-                featureidkey="properties.Site",
-                color="predicted_risk_level",
-                color_discrete_map=risk_color_map,
-                category_orders={"predicted_risk_level": category_order},
-                hover_name="Site",
-                custom_data=["Site"],
-                hover_data={
-                    "predicted_risk_level": True,
-                    "predicted_risk": ":.4f",
-                },
-                zoom=5.2,
-                center={"lat": 54.5, "lon": -3.0},
-                mapbox_style=base_map_style,
-            )
+        fig_map = px.choropleth_mapbox(
+            latest_df,
+            geojson=catchment_geojson,
+            locations="Site",
+            featureidkey="properties.Site",
+            color="predicted_risk_level",
+            color_discrete_map=risk_color_map,
+            category_orders={"predicted_risk_level": category_order},
+            hover_name="Site",
+            custom_data=["Site"],
+            hover_data={
+                "predicted_risk_level": True,
+                "predicted_risk": ":.4f",
+            },
+            zoom=5.2,
+            center={"lat": 54.5, "lon": -3.0},
+            mapbox_style=base_map_style,
+        )
 
         # Overlay intake location markers on top of catchment polygons
         fig_map.add_trace(
@@ -634,34 +621,19 @@ with col_map:
         )
     else:
         # Fallback to scatter map
-        if hasattr(px, "scatter_map"):
-            fig_map = px.scatter_map(
-                latest_df,
-                lat="lat",
-                lon="lon",
-                color="predicted_risk_level",
-                color_discrete_map=risk_color_map,
-                category_orders={"predicted_risk_level": category_order},
-                hover_name="Site",
-                custom_data=["Site"],
-                zoom=5.2,
-                center={"lat": 54.5, "lon": -3.0},
-                map_style=base_map_style,
-            )
-        else:
-            fig_map = px.scatter_mapbox(
-                latest_df,
-                lat="lat",
-                lon="lon",
-                color="predicted_risk_level",
-                color_discrete_map=risk_color_map,
-                category_orders={"predicted_risk_level": category_order},
-                hover_name="Site",
-                custom_data=["Site"],
-                zoom=5.2,
-                center={"lat": 54.5, "lon": -3.0},
-                mapbox_style=base_map_style,
-            )
+        fig_map = px.scatter_mapbox(
+            latest_df,
+            lat="lat",
+            lon="lon",
+            color="predicted_risk_level",
+            color_discrete_map=risk_color_map,
+            category_orders={"predicted_risk_level": category_order},
+            hover_name="Site",
+            custom_data=["Site"],
+            zoom=5.2,
+            center={"lat": 54.5, "lon": -3.0},
+            mapbox_style=base_map_style,
+        )
 
     selected_row = latest_df[latest_df["Site"] == selected_site]
     if not selected_row.empty:
