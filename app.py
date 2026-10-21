@@ -1,3 +1,4 @@
+import os
 import sqlite3
 import numpy as np
 import pandas as pd
@@ -7,6 +8,7 @@ import pyproj
 import re
 import streamlit as st
 from shapely import ops, wkb
+from shapely.geometry import mapping
 
 # Detect Plotly version capabilities for map traces
 if hasattr(go, "Scattermap"):
@@ -173,16 +175,122 @@ def parse_gpkg_geom(blob):
     """Parses binary GeoPackage BLOB into Shapely geometry."""
     if blob is None:
         return None
-    flags = blob[3]
-    envelope_type = (flags >> 1) & 0x07
-    env_sizes = {0: 0, 1: 32, 2: 48, 3: 48, 4: 64}
-    header_len = 8 + env_sizes.get(envelope_type, 0)
-    return wkb.loads(blob[header_len:])
+    try:
+        flags = blob[3]
+        envelope_type = (flags >> 1) & 0x07
+        env_sizes = {0: 0, 1: 32, 2: 48, 3: 48, 4: 64}
+        header_len = 8 + env_sizes.get(envelope_type, 0)
+        return wkb.loads(blob[header_len:])
+    except Exception:
+        return None
 
 
 def normalize_name(s):
     """Normalizes site names for case- and symbol-insensitive matching."""
     return str(s).lower().replace(" ", "_").replace("-", "_")
+
+
+@st.cache_data
+def load_catchment_polygons(site_names):
+    """Loads catchment boundary polygons from GPKG databases or builds smooth network envelopes."""
+    features = []
+    norm_map = {normalize_name(s): s for s in site_names}
+
+    gpkg_candidates = [
+        "riversage_52_catchments__boundaries.gpkg",
+        "riversage_52_catchments__upstream_networks.gpkg",
+        "riversage_52_catchments.gpkg",
+    ]
+
+    for gpkg in gpkg_candidates:
+        if os.path.exists(gpkg):
+            try:
+                conn = sqlite3.connect(gpkg)
+                tables_df = pd.read_sql_query(
+                    "SELECT name FROM sqlite_master WHERE type='table';", conn
+                )
+                for tbl in tables_df["name"]:
+                    info = pd.read_sql_query(
+                        f"PRAGMA table_info({tbl})", conn
+                    )
+                    cols = info["name"].tolist()
+                    if "geom" in cols:
+                        site_col = next(
+                            (
+                                c
+                                for c in [
+                                    "target_name",
+                                    "Site",
+                                    "site_name",
+                                    "canonical_name",
+                                ]
+                                if c in cols
+                            ),
+                            None,
+                        )
+                        if site_col:
+                            df_geom = pd.read_sql_query(
+                                f"SELECT {site_col}, geom FROM {tbl}", conn
+                            )
+                            for _, row in df_geom.iterrows():
+                                raw_site = row[site_col]
+                                norm_s = normalize_name(raw_site)
+                                canonical_site = norm_map.get(norm_s, raw_site)
+
+                                geom_blob = row["geom"]
+                                if geom_blob:
+                                    geom = parse_gpkg_geom(geom_blob)
+                                    if geom:
+                                        geom_wgs84 = ops.transform(
+                                            transformer.transform, geom
+                                        )
+
+                                        # Catchment boundary polygon
+                                        if geom_wgs84.geom_type in [
+                                            "Polygon",
+                                            "MultiPolygon",
+                                        ]:
+                                            features.append(
+                                                {
+                                                    "type": "Feature",
+                                                    "id": canonical_site,
+                                                    "properties": {
+                                                        "Site": canonical_site
+                                                    },
+                                                    "geometry": mapping(
+                                                        geom_wgs84
+                                                    ),
+                                                }
+                                            )
+                                        # River network vector envelope
+                                        elif geom_wgs84.geom_type in [
+                                            "LineString",
+                                            "MultiLineString",
+                                        ]:
+                                            envelope = (
+                                                geom_wgs84.convex_hull.buffer(
+                                                    0.012
+                                                )
+                                            )
+                                            features.append(
+                                                {
+                                                    "type": "Feature",
+                                                    "id": canonical_site,
+                                                    "properties": {
+                                                        "Site": canonical_site
+                                                    },
+                                                    "geometry": mapping(
+                                                        envelope
+                                                    ),
+                                                }
+                                            )
+                conn.close()
+            except Exception:
+                pass
+
+    if features:
+        return {"type": "FeatureCollection", "features": features}
+    return None
 
 
 @st.cache_data
@@ -199,9 +307,11 @@ def get_site_spatial_data(site_name, amber_thresh=0.5, red_thresh=2.0):
 
         for _, row in site_feats.iterrows():
             feat = str(row["Feature"])
-            if "CSO" in feat and not any(k in feat for k in ["count", "mean", "max", "min"]):
+            if "CSO" in feat and not any(
+                k in feat for k in ["count", "mean", "max", "min"]
+            ):
                 gain_val = float(row["Mean_Gain_Percent"])
-                
+
                 digits = re.sub(r"\D", "", feat)
                 if digits:
                     cso_importance[digits] = gain_val
@@ -217,11 +327,18 @@ def get_site_spatial_data(site_name, amber_thresh=0.5, red_thresh=2.0):
     site_csos = pd.DataFrame()
     try:
         conn_cso = sqlite3.connect("riversage_52_catchments__cso_sites.gpkg")
-        
+
         sample_df = pd.read_sql_query(
-            "SELECT * FROM riversage_52_catchments__cso_sites LIMIT 1", conn_cso
+            "SELECT * FROM riversage_52_catchments__cso_sites LIMIT 1",
+            conn_cso,
         )
-        cso_cols = ["canonical_cso_id", "company", "canonical_name", "canonical_easting", "canonical_northing"]
+        cso_cols = [
+            "canonical_cso_id",
+            "company",
+            "canonical_name",
+            "canonical_easting",
+            "canonical_northing",
+        ]
         if "permit_number" in sample_df.columns:
             cso_cols.append("permit_number")
 
@@ -235,11 +352,11 @@ def get_site_spatial_data(site_name, amber_thresh=0.5, red_thresh=2.0):
             s_id = str(raw_id).strip()
             digits = re.sub(r"\D", "", s_id)
             candidates = [
-                s_id, 
-                digits, 
-                str(int(digits)) if digits else "", 
-                f"CSO_{digits}", 
-                f"CSO_{int(digits)}" if digits else ""
+                s_id,
+                digits,
+                str(int(digits)) if digits else "",
+                f"CSO_{digits}",
+                f"CSO_{int(digits)}" if digits else "",
             ]
             for candidate in candidates:
                 if candidate in cso_importance:
@@ -289,16 +406,17 @@ def get_site_spatial_data(site_name, amber_thresh=0.5, red_thresh=2.0):
         for geom_blob in matched_net["geom"]:
             if geom_blob:
                 geom = parse_gpkg_geom(geom_blob)
-                geom_wgs84 = ops.transform(transformer.transform, geom)
-                geoms = (
-                    geom_wgs84.geoms
-                    if geom_wgs84.geom_type == "MultiLineString"
-                    else [geom_wgs84]
-                )
-                for g in geoms:
-                    coords = list(g.coords)
-                    river_lons.extend([c[0] for c in coords] + [None])
-                    river_lats.extend([c[1] for c in coords] + [None])
+                if geom:
+                    geom_wgs84 = ops.transform(transformer.transform, geom)
+                    geoms = (
+                        geom_wgs84.geoms
+                        if geom_wgs84.geom_type == "MultiLineString"
+                        else [geom_wgs84]
+                    )
+                    for g in geoms:
+                        coords = list(g.coords)
+                        river_lons.extend([c[0] for c in coords] + [None])
+                        river_lats.extend([c[1] for c in coords] + [None])
     except Exception as e:
         st.warning(f"River network load warning: {e}")
 
@@ -306,7 +424,7 @@ def get_site_spatial_data(site_name, amber_thresh=0.5, red_thresh=2.0):
 
 
 def calculate_map_center_and_zoom(lats, lons):
-    """Calculates center lat/lon and appropriate zoom level to fit all network elements initially."""
+    """Calculates center lat/lon and zoom level to fit all network elements initially."""
     valid_lats = [la for la in lats if la is not None and not np.isnan(la)]
     valid_lons = [lo for lo in lons if lo is not None and not np.isnan(lo)]
 
@@ -347,14 +465,19 @@ df = load_and_prepare_data()
 all_available_sites = sorted(df["Site"].unique())
 if CUSTOM_SITE_LIST and len(CUSTOM_SITE_LIST) > 0:
     norm_custom = [normalize_name(s) for s in CUSTOM_SITE_LIST]
-    site_list = [s for s in all_available_sites if normalize_name(s) in norm_custom]
+    site_list = [
+        s for s in all_available_sites if normalize_name(s) in norm_custom
+    ]
     if not site_list:
         site_list = all_available_sites
 else:
     site_list = all_available_sites
 
 # Initialize session state for initial load site
-if "selected_site" not in st.session_state or st.session_state["selected_site"] not in site_list:
+if (
+    "selected_site" not in st.session_state
+    or st.session_state["selected_site"] not in site_list
+):
     if INITIAL_SITE in site_list:
         st.session_state["selected_site"] = INITIAL_SITE
     else:
@@ -367,7 +490,9 @@ st.sidebar.title("Navigation & Filters")
 
 # Site Selectbox Sync
 site_idx = site_list.index(st.session_state["selected_site"])
-chosen_site = st.sidebar.selectbox("Select Target Intake Site:", site_list, index=site_idx)
+chosen_site = st.sidebar.selectbox(
+    "Select Target Intake Site:", site_list, index=site_idx
+)
 if chosen_site != st.session_state["selected_site"]:
     st.session_state["selected_site"] = chosen_site
     st.rerun()
@@ -392,7 +517,9 @@ med_count = (latest_df["predicted_risk_level"] == "Medium").sum()
 low_count = (latest_df["predicted_risk_level"] == "Low").sum()
 
 st.sidebar.markdown(f"🔴 **High Risk:** {high_count}  \n*(>0.50 oocysts/L)*\n")
-st.sidebar.markdown(f"🟡 **Medium Risk:** {med_count}  \n*(0.25 - 0.50 oocysts/L)*\n")
+st.sidebar.markdown(
+    f"🟡 **Medium Risk:** {med_count}  \n*(0.25 - 0.50 oocysts/L)*\n"
+)
 st.sidebar.markdown(f"🟢 **Low Risk:** {low_count}  \n*(<0.25 oocysts/L)*\n")
 
 st.sidebar.divider()
@@ -404,7 +531,9 @@ red_thresh = st.sidebar.slider(
     "Red Threshold (% Gain)", 1.0, 10.0, 2.0, step=0.5
 )
 
-show_terrain = st.sidebar.checkbox("Enable Terrain / Topo Map Background", value=False)
+show_terrain = st.sidebar.checkbox(
+    "Enable Terrain / Topo Map Background", value=False
+)
 base_map_style = "open-street-map" if show_terrain else "carto-positron"
 
 st.sidebar.divider()
@@ -429,7 +558,9 @@ col_map, col_chart = st.columns([2.2, 1])
 
 with col_map:
     st.subheader(f"Catchment Risk Levels ({selected_month})")
-    st.caption("💡 *Click any catchment marker on the map or select from the sidebar.*")
+    st.caption(
+        "💡 *Click any catchment area or marker on the map to inspect its trend.*"
+    )
 
     risk_color_map = {
         "High": "#E63946",
@@ -440,52 +571,92 @@ with col_map:
 
     category_order = ["High", "Medium", "Low", "No Data"]
 
-    if hasattr(px, "scatter_map"):
-        fig_map = px.scatter_map(
-            latest_df,
-            lat="lat",
-            lon="lon",
-            color="predicted_risk_level",
-            color_discrete_map=risk_color_map,
-            category_orders={"predicted_risk_level": category_order},
-            hover_name="Site",
-            custom_data=["Site"],
-            hover_data={
-                "predicted_risk_level": True,
-                "predicted_risk": ":.4f",
-                "lat": False,
-                "lon": False,
-            },
-            zoom=5.2,
-            center={"lat": 54.5, "lon": -3.0},
-            map_style=base_map_style,
+    # Load catchment area polygons
+    catchment_geojson = load_catchment_polygons(site_list)
+
+    if catchment_geojson and len(catchment_geojson["features"]) > 0:
+        # Choropleth catchment area polygons
+        if hasattr(px, "choropleth_map"):
+            fig_map = px.choropleth_map(
+                latest_df,
+                geojson=catchment_geojson,
+                locations="Site",
+                featureidkey="properties.Site",
+                color="predicted_risk_level",
+                color_discrete_map=risk_color_map,
+                category_orders={"predicted_risk_level": category_order},
+                hover_name="Site",
+                custom_data=["Site"],
+                hover_data={
+                    "predicted_risk_level": True,
+                    "predicted_risk": ":.4f",
+                },
+                zoom=5.2,
+                center={"lat": 54.5, "lon": -3.0},
+                map_style=base_map_style,
+            )
+        else:
+            fig_map = px.choropleth_mapbox(
+                latest_df,
+                geojson=catchment_geojson,
+                locations="Site",
+                featureidkey="properties.Site",
+                color="predicted_risk_level",
+                color_discrete_map=risk_color_map,
+                category_orders={"predicted_risk_level": category_order},
+                hover_name="Site",
+                custom_data=["Site"],
+                hover_data={
+                    "predicted_risk_level": True,
+                    "predicted_risk": ":.4f",
+                },
+                zoom=5.2,
+                center={"lat": 54.5, "lon": -3.0},
+                mapbox_style=base_map_style,
+            )
+
+        # Overlay intake location markers on top of catchment polygons
+        fig_map.add_trace(
+            ScatterMapTrace(
+                lat=latest_df["lat"],
+                lon=latest_df["lon"],
+                mode="markers",
+                marker=dict(size=8, color="#1D3557"),
+                customdata=latest_df[["Site"]].values,
+                hoverinfo="skip",
+                showlegend=False,
+            )
         )
     else:
-        fig_map = px.scatter_mapbox(
-            latest_df,
-            lat="lat",
-            lon="lon",
-            color="predicted_risk_level",
-            color_discrete_map=risk_color_map,
-            category_orders={"predicted_risk_level": category_order},
-            hover_name="Site",
-            custom_data=["Site"],
-            hover_data={
-                "predicted_risk_level": True,
-                "predicted_risk": ":.4f",
-                "lat": False,
-                "lon": False,
-            },
-            zoom=5.2,
-            center={"lat": 54.5, "lon": -3.0},
-            mapbox_style=base_map_style,
-        )
-
-    fig_map.update_traces(
-        marker={"size": 14, "opacity": 0.85},
-        unselected={"marker": {"opacity": 0.85}},
-        selected={"marker": {"opacity": 0.85}},
-    )
+        # Fallback to scatter map
+        if hasattr(px, "scatter_map"):
+            fig_map = px.scatter_map(
+                latest_df,
+                lat="lat",
+                lon="lon",
+                color="predicted_risk_level",
+                color_discrete_map=risk_color_map,
+                category_orders={"predicted_risk_level": category_order},
+                hover_name="Site",
+                custom_data=["Site"],
+                zoom=5.2,
+                center={"lat": 54.5, "lon": -3.0},
+                map_style=base_map_style,
+            )
+        else:
+            fig_map = px.scatter_mapbox(
+                latest_df,
+                lat="lat",
+                lon="lon",
+                color="predicted_risk_level",
+                color_discrete_map=risk_color_map,
+                category_orders={"predicted_risk_level": category_order},
+                hover_name="Site",
+                custom_data=["Site"],
+                zoom=5.2,
+                center={"lat": 54.5, "lon": -3.0},
+                mapbox_style=base_map_style,
+            )
 
     selected_row = latest_df[latest_df["Site"] == selected_site]
     if not selected_row.empty:
@@ -494,13 +665,12 @@ with col_map:
                 lat=selected_row["lat"],
                 lon=selected_row["lon"],
                 mode="markers",
-                marker=dict(size=6, color="black"),
+                marker=dict(size=12, color="black"),
                 hoverinfo="skip",
                 showlegend=False,
             )
         )
 
-    # Removed UK map legend to enlarge graph viewing area
     fig_map.update_layout(
         height=680,
         showlegend=False,
@@ -515,7 +685,11 @@ with col_map:
         key="map_plot",
     )
 
-    if map_event and "selection" in map_event and map_event["selection"].get("points"):
+    if (
+        map_event
+        and "selection" in map_event
+        and map_event["selection"].get("points")
+    ):
         points = map_event["selection"]["points"]
         if points and "customdata" in points[0]:
             clicked_site = points[0]["customdata"][0]
@@ -538,9 +712,11 @@ with col_chart:
     # --- Chart Settings / Range Filter Expander ---
     with st.expander("⚙️ Chart Range Settings"):
         col_opt1, col_opt2 = st.columns(2)
-        
+
         with col_opt1:
-            use_manual_x = st.checkbox("Override Date Range (X-Axis)", value=False)
+            use_manual_x = st.checkbox(
+                "Override Date Range (X-Axis)", value=False
+            )
             if use_manual_x:
                 cx1, cx2 = st.columns(2)
                 x_min = cx1.text_input("Start Month", value="2018-01")
@@ -553,7 +729,9 @@ with col_chart:
 
         with col_opt2:
             if graph_type == "Line Chart (Concentrations)":
-                use_manual_y = st.checkbox("Override Y-Axis Range", value=False)
+                use_manual_y = st.checkbox(
+                    "Override Y-Axis Range", value=False
+                )
                 if use_manual_y:
                     cy1, cy2 = st.columns(2)
                     y_min = cy1.number_input("Y Min", value=0.0, step=0.05)
@@ -651,7 +829,9 @@ with col_chart:
             )
 
         line_layout = dict(
-            title=dict(text=f"Risk Score Trend: {selected_site}", pad=dict(b=15)),
+            title=dict(
+                text=f"Risk Score Trend: {selected_site}", pad=dict(b=15)
+            ),
             xaxis_title="Year / Month",
             yaxis_title="Mean Crypto conc (oocysts/L)",
             hovermode="x unified",
@@ -688,7 +868,9 @@ with col_chart:
 # 6. Upstream River Network & CSO Spatial Inspector
 # ---------------------------------------------------------
 st.divider()
-st.subheader(f"🌊 Upstream Catchment Network & Contributing CSOs: {selected_site}")
+st.subheader(
+    f"🌊 Upstream Catchment Network & Contributing CSOs: {selected_site}"
+)
 st.caption(
     "Interactive spatial view showing the intake location, upstream river channels, and High/Medium impact Combined Sewer Overflows (CSOs)."
 )
@@ -791,7 +973,9 @@ if river_lons or not high_med_csos.empty:
         all_lats.append(intake_lat)
         all_lons.append(intake_lon)
 
-    c_lat, c_lon, initial_zoom = calculate_map_center_and_zoom(all_lats, all_lons)
+    c_lat, c_lon, initial_zoom = calculate_map_center_and_zoom(
+        all_lats, all_lons
+    )
 
     map_config = {
         "style": base_map_style,
@@ -826,7 +1010,9 @@ if river_lons or not high_med_csos.empty:
     )
 
     if not high_med_csos.empty:
-        with st.expander("📋 View Contributing High & Medium Impact CSO Breakdown"):
+        with st.expander(
+            "📋 View Contributing High & Medium Impact CSO Breakdown"
+        ):
             cso_display = high_med_csos[
                 [
                     "canonical_cso_id",
