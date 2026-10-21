@@ -13,9 +13,11 @@ from shapely.geometry import Point, mapping, GeometryCollection
 # Detect Plotly version capabilities for map traces
 if hasattr(go, "Scattermap"):
     ScatterMapTrace = go.Scattermap
+    ChoroplethMapTrace = go.Choroplethmap
     MAP_DICT_KEY = "map"
 else:
     ScatterMapTrace = go.Scattermapbox
+    ChoroplethMapTrace = go.Choroplethmapbox
     MAP_DICT_KEY = "mapbox"
 
 # ---------------------------------------------------------
@@ -192,8 +194,8 @@ def normalize_name(s):
 
 @st.cache_data
 def load_catchment_polygons_from_coords(sites_tuples):
-    """Memory-efficient generation of catchment polygons staying well under 1GB RAM."""
-    features = []
+    """Memory-efficient generation of catchment polygons indexed by site name."""
+    features_by_site = {}
 
     site_dict = {}
     for s_name, e_val, n_val in sites_tuples:
@@ -226,7 +228,6 @@ def load_catchment_polygons_from_coords(sites_tuples):
                     if geom_osgb and not geom_osgb.is_empty:
                         if norm_target not in site_osgb_geoms:
                             site_osgb_geoms[norm_target] = []
-                        # Simplify individual lines prior to collection to minimize memory footprint
                         site_osgb_geoms[norm_target].append(
                             geom_osgb.simplify(100.0, preserve_topology=False)
                         )
@@ -240,7 +241,6 @@ def load_catchment_polygons_from_coords(sites_tuples):
 
         if norm_s in site_osgb_geoms and len(site_osgb_geoms[norm_s]) > 0:
             all_reaches = GeometryCollection(site_osgb_geoms[norm_s])
-            # Memory-efficient 1.8km buffer along simplified channels
             catchment_osgb = all_reaches.buffer(1800, resolution=4)
 
         # Fallback if no network vectors exist: 4km radius catchment zone around intake
@@ -257,35 +257,25 @@ def load_catchment_polygons_from_coords(sites_tuples):
         if catchment_osgb and not catchment_osgb.is_empty:
             area_sq_km = float(catchment_osgb.area / 1e6)
 
-            # Transform OSGB meter coordinates to WGS84 lat/lon
             catchment_wgs84 = ops.transform(
                 transformer.transform, catchment_osgb
             )
-
-            # Web-optimized simplification
             catchment_simple = catchment_wgs84.simplify(
-                0.0005, preserve_topology=True
+                0.0003, preserve_topology=True
             )
 
-            features.append(
-                {
-                    "type": "Feature",
-                    "id": canonical_name,
-                    "properties": {
-                        "Site": canonical_name,
-                        "area_sq_km": area_sq_km,
-                    },
-                    "geometry": mapping(catchment_simple),
-                }
-            )
+            feature = {
+                "type": "Feature",
+                "id": canonical_name,
+                "properties": {
+                    "Site": canonical_name,
+                    "area_sq_km": area_sq_km,
+                },
+                "geometry": mapping(catchment_simple),
+            }
+            features_by_site[canonical_name] = feature
 
-    if features:
-        # Sort features DESCENDING by area (largest drawn first, smallest drawn last on top)
-        features.sort(
-            key=lambda f: f["properties"]["area_sq_km"], reverse=True
-        )
-        return {"type": "FeatureCollection", "features": features}
-    return None
+    return features_by_site
 
 
 @st.cache_data
@@ -564,8 +554,6 @@ with col_map:
         "No Data": "#94A3B8",
     }
 
-    category_order = ["High", "Medium", "Low", "No Data"]
-
     # Convert DataFrame rows to hashable tuples for caching
     site_meta_unique = latest_df.drop_duplicates(subset=["Site"])
     sites_tuples = tuple(
@@ -577,60 +565,75 @@ with col_map:
         for _, row in site_meta_unique.iterrows()
     )
 
-    catchment_geojson = load_catchment_polygons_from_coords(sites_tuples)
+    features_by_site = load_catchment_polygons_from_coords(sites_tuples)
 
-    if catchment_geojson and len(catchment_geojson["features"]) > 0:
-        # Align latest_df sort order with GeoJSON area sorting (largest first, smallest on top)
-        geojson_site_order = [
-            f["properties"]["Site"] for f in catchment_geojson["features"]
-        ]
-        latest_df["site_sort_idx"] = latest_df["Site"].map(
-            lambda x: (
-                geojson_site_order.index(x) if x in geojson_site_order else 999
-            )
-        )
-        latest_df = latest_df.sort_values("site_sort_idx")
+    fig_map = go.Figure()
 
-        fig_map = px.choropleth_mapbox(
-            latest_df,
-            geojson=catchment_geojson,
-            locations="Site",
-            featureidkey="properties.Site",
-            color="predicted_risk_level",
-            color_discrete_map=risk_color_map,
-            category_orders={"predicted_risk_level": category_order},
-            hover_name="Site",
-            custom_data=["Site"],
-            hover_data={
-                "predicted_risk_level": True,
-                "predicted_risk": ":.4f",
-            },
-            zoom=5.2,
-            center={"lat": 54.5, "lon": -3.0},
-            mapbox_style=base_map_style,
+    if features_by_site:
+        # Match each site with its area sq km
+        latest_df["area_sq_km"] = latest_df["Site"].map(
+            lambda s: features_by_site[s]["properties"]["area_sq_km"]
+            if s in features_by_site
+            else 0.0
         )
+
+        # Sort DataFrame DESCENDING by area (Largest Area first = bottom layer, Smallest Area last = top layer)
+        latest_df_sorted = latest_df.sort_values("area_sq_km", ascending=False)
+
+        # Add an individual Choropleth trace per catchment in area-descending order
+        for _, row in latest_df_sorted.iterrows():
+            site_name = row["Site"]
+            if site_name in features_by_site:
+                risk_lvl = row["predicted_risk_level"]
+                risk_score = row.get("predicted_risk", 0.0)
+                color_hex = risk_color_map.get(risk_lvl, "#94A3B8")
+                feat = features_by_site[site_name]
+
+                single_geojson = {
+                    "type": "FeatureCollection",
+                    "features": [feat],
+                }
+
+                hover_txt = (
+                    f"<b>{site_name}</b><br>"
+                    f"Risk Level: <b>{risk_lvl}</b><br>"
+                    f"Predicted Conc: <b>{risk_score:.4f} oocysts/L</b>"
+                )
+
+                fig_map.add_trace(
+                    ChoroplethMapTrace(
+                        geojson=single_geojson,
+                        locations=[site_name],
+                        z=[1],
+                        colorscale=[[0, color_hex], [1, color_hex]],
+                        showscale=False,
+                        name=site_name,
+                        text=hover_txt,
+                        hoverinfo="text",
+                        customdata=[[site_name]],
+                    )
+                )
 
         # Overlay intake location markers on top of catchment polygons
         fig_map.add_trace(
             ScatterMapTrace(
-                lat=latest_df["lat"],
-                lon=latest_df["lon"],
+                lat=latest_df_sorted["lat"],
+                lon=latest_df_sorted["lon"],
                 mode="markers",
                 marker=dict(size=7, color="#1D3557"),
-                customdata=latest_df[["Site"]].values,
+                customdata=latest_df_sorted[["Site"]].values,
                 hoverinfo="skip",
                 showlegend=False,
             )
         )
     else:
-        # Fallback to scatter map
+        # Fallback scatter map
         fig_map = px.scatter_mapbox(
             latest_df,
             lat="lat",
             lon="lon",
             color="predicted_risk_level",
             color_discrete_map=risk_color_map,
-            category_orders={"predicted_risk_level": category_order},
             hover_name="Site",
             custom_data=["Site"],
             zoom=5.2,
@@ -638,6 +641,7 @@ with col_map:
             mapbox_style=base_map_style,
         )
 
+    # Highlight selected site marker
     selected_row = latest_df[latest_df["Site"] == selected_site]
     if not selected_row.empty:
         fig_map.add_trace(
@@ -651,11 +655,18 @@ with col_map:
             )
         )
 
-    fig_map.update_layout(
-        height=680,
-        showlegend=False,
-        margin={"r": 0, "t": 0, "l": 0, "b": 0},
-    )
+    map_layout_kwargs = {
+        MAP_DICT_KEY: dict(
+            style=base_map_style,
+            center=dict(lat=54.5, lon=-3.0),
+            zoom=5.2,
+        ),
+        "height": 680,
+        "showlegend": False,
+        "margin": dict(r=0, t=0, l=0, b=0),
+    }
+
+    fig_map.update_layout(**map_layout_kwargs)
 
     map_event = st.plotly_chart(
         fig_map,
