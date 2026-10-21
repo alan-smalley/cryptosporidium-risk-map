@@ -509,6 +509,14 @@ st.sidebar.markdown(f"🟢 **Low Risk:** {low_count}  \n*(<0.25 oocysts/L)*\n")
 
 st.sidebar.divider()
 st.sidebar.markdown("### CSO & Map Settings")
+
+# Map View Selection (Catchment Polygons vs Intake Markers)
+map_view_mode = st.sidebar.radio(
+    "Map View Mode:",
+    ["Catchment Polygons", "Intake Point Markers"],
+    index=0,
+)
+
 amber_thresh = st.sidebar.slider(
     "Amber Threshold (% Gain)", 0.0, 2.0, 0.5, step=0.1
 )
@@ -553,121 +561,220 @@ with col_map:
         "Low": "#2A9D8F",
         "No Data": "#94A3B8",
     }
+    category_order = ["High", "Medium", "Low", "No Data"]
 
-    # Convert DataFrame rows to hashable tuples for caching
-    site_meta_unique = latest_df.drop_duplicates(subset=["Site"])
-    sites_tuples = tuple(
-        (
-            row["Site"],
-            row.get("Eastings", None),
-            row.get("Northings", None),
-        )
-        for _, row in site_meta_unique.iterrows()
-    )
-
-    features_by_site = load_catchment_polygons_from_coords(sites_tuples)
-
-    fig_map = go.Figure()
-
-    if features_by_site:
-        # Match each site with its area sq km
-        latest_df["area_sq_km"] = latest_df["Site"].map(
-            lambda s: features_by_site[s]["properties"]["area_sq_km"]
-            if s in features_by_site
-            else 0.0
+    # -----------------------------------------------------
+    # MODE A: Catchment Area Polygons
+    # -----------------------------------------------------
+    if map_view_mode == "Catchment Polygons":
+        site_meta_unique = latest_df.drop_duplicates(subset=["Site"])
+        sites_tuples = tuple(
+            (
+                row["Site"],
+                row.get("Eastings", None),
+                row.get("Northings", None),
+            )
+            for _, row in site_meta_unique.iterrows()
         )
 
-        # Sort DataFrame DESCENDING by area (Largest Area first = bottom layer, Smallest Area last = top layer)
-        latest_df_sorted = latest_df.sort_values("area_sq_km", ascending=False)
+        features_by_site = load_catchment_polygons_from_coords(sites_tuples)
 
-        # Add an individual Choropleth trace per catchment in area-descending order
-        for _, row in latest_df_sorted.iterrows():
-            site_name = row["Site"]
-            if site_name in features_by_site:
-                risk_lvl = row["predicted_risk_level"]
-                risk_score = row.get("predicted_risk", 0.0)
-                color_hex = risk_color_map.get(risk_lvl, "#94A3B8")
-                feat = features_by_site[site_name]
+        fig_map = go.Figure()
 
-                single_geojson = {
-                    "type": "FeatureCollection",
-                    "features": [feat],
-                }
+        if features_by_site:
+            latest_df["area_sq_km"] = latest_df["Site"].map(
+                lambda s: features_by_site[s]["properties"]["area_sq_km"]
+                if s in features_by_site
+                else 0.0
+            )
 
-                hover_txt = (
-                    f"<b>{site_name}</b><br>"
-                    f"Risk Level: <b>{risk_lvl}</b><br>"
-                    f"Predicted Conc: <b>{risk_score:.4f} oocysts/L</b>"
+            # Sort DataFrame DESCENDING by area (Largest Area first = bottom layer, Smallest Area last = top layer)
+            latest_df_sorted = latest_df.sort_values(
+                "area_sq_km", ascending=False
+            )
+
+            for _, row in latest_df_sorted.iterrows():
+                site_name = row["Site"]
+                if site_name in features_by_site:
+                    risk_lvl = row["predicted_risk_level"]
+                    risk_score = row.get("predicted_risk", 0.0)
+                    color_hex = risk_color_map.get(risk_lvl, "#94A3B8")
+                    feat = features_by_site[site_name]
+
+                    single_geojson = {
+                        "type": "FeatureCollection",
+                        "features": [feat],
+                    }
+
+                    hover_txt = (
+                        f"<b>{site_name}</b><br>"
+                        f"Risk Level: <b>{risk_lvl}</b><br>"
+                        f"Predicted Conc: <b>{risk_score:.4f} oocysts/L</b>"
+                    )
+
+                    fig_map.add_trace(
+                        ChoroplethMapTrace(
+                            geojson=single_geojson,
+                            locations=[site_name],
+                            z=[1],
+                            colorscale=[[0, color_hex], [1, color_hex]],
+                            showscale=False,
+                            name=site_name,
+                            text=hover_txt,
+                            hoverinfo="text",
+                            customdata=[[site_name]],
+                        )
+                    )
+
+            # Overlay intake location markers on top of catchment polygons
+            fig_map.add_trace(
+                ScatterMapTrace(
+                    lat=latest_df_sorted["lat"],
+                    lon=latest_df_sorted["lon"],
+                    mode="markers",
+                    marker=dict(size=7, color="#1D3557"),
+                    customdata=latest_df_sorted[["Site"]].values,
+                    hoverinfo="skip",
+                    showlegend=False,
                 )
+            )
 
+            # Highlight active site marker
+            selected_row = latest_df[latest_df["Site"] == selected_site]
+            if not selected_row.empty:
                 fig_map.add_trace(
-                    ChoroplethMapTrace(
-                        geojson=single_geojson,
-                        locations=[site_name],
-                        z=[1],
-                        colorscale=[[0, color_hex], [1, color_hex]],
-                        showscale=False,
-                        name=site_name,
-                        text=hover_txt,
-                        hoverinfo="text",
-                        customdata=[[site_name]],
+                    ScatterMapTrace(
+                        lat=selected_row["lat"],
+                        lon=selected_row["lon"],
+                        mode="markers",
+                        marker=dict(size=12, color="black"),
+                        hoverinfo="skip",
+                        showlegend=False,
                     )
                 )
 
-        # Overlay intake location markers on top of catchment polygons
-        fig_map.add_trace(
-            ScatterMapTrace(
-                lat=latest_df_sorted["lat"],
-                lon=latest_df_sorted["lon"],
-                mode="markers",
-                marker=dict(size=7, color="#1D3557"),
-                customdata=latest_df_sorted[["Site"]].values,
-                hoverinfo="skip",
+            map_layout_kwargs = {
+                MAP_DICT_KEY: dict(
+                    style=base_map_style,
+                    center=dict(lat=54.5, lon=-3.0),
+                    zoom=5.2,
+                ),
+                "height": 680,
+                "showlegend": False,
+                "margin": dict(r=0, t=0, l=0, b=0),
+            }
+            fig_map.update_layout(**map_layout_kwargs)
+
+        else:
+            # Fallback to scatter map if polygon geometries unavailable
+            if hasattr(px, "scatter_map"):
+                fig_map = px.scatter_map(
+                    latest_df,
+                    lat="lat",
+                    lon="lon",
+                    color="predicted_risk_level",
+                    color_discrete_map=risk_color_map,
+                    category_orders={"predicted_risk_level": category_order},
+                    hover_name="Site",
+                    custom_data=["Site"],
+                    zoom=5.2,
+                    center={"lat": 54.5, "lon": -3.0},
+                    map_style=base_map_style,
+                )
+            else:
+                fig_map = px.scatter_mapbox(
+                    latest_df,
+                    lat="lat",
+                    lon="lon",
+                    color="predicted_risk_level",
+                    color_discrete_map=risk_color_map,
+                    category_orders={"predicted_risk_level": category_order},
+                    hover_name="Site",
+                    custom_data=["Site"],
+                    zoom=5.2,
+                    center={"lat": 54.5, "lon": -3.0},
+                    mapbox_style=base_map_style,
+                )
+
+            fig_map.update_layout(
+                height=680,
                 showlegend=False,
+                margin={"r": 0, "t": 0, "l": 0, "b": 0},
             )
-        )
+
+    # -----------------------------------------------------
+    # MODE B: Intake Point Markers (Classic View)
+    # -----------------------------------------------------
     else:
-        # Fallback scatter map
-        fig_map = px.scatter_mapbox(
-            latest_df,
-            lat="lat",
-            lon="lon",
-            color="predicted_risk_level",
-            color_discrete_map=risk_color_map,
-            hover_name="Site",
-            custom_data=["Site"],
-            zoom=5.2,
-            center={"lat": 54.5, "lon": -3.0},
-            mapbox_style=base_map_style,
-        )
-
-    # Highlight selected site marker
-    selected_row = latest_df[latest_df["Site"] == selected_site]
-    if not selected_row.empty:
-        fig_map.add_trace(
-            ScatterMapTrace(
-                lat=selected_row["lat"],
-                lon=selected_row["lon"],
-                mode="markers",
-                marker=dict(size=12, color="black"),
-                hoverinfo="skip",
-                showlegend=False,
+        if hasattr(px, "scatter_map"):
+            fig_map = px.scatter_map(
+                latest_df,
+                lat="lat",
+                lon="lon",
+                color="predicted_risk_level",
+                color_discrete_map=risk_color_map,
+                category_orders={"predicted_risk_level": category_order},
+                hover_name="Site",
+                custom_data=["Site"],
+                hover_data={
+                    "predicted_risk_level": True,
+                    "predicted_risk": ":.4f",
+                    "lat": False,
+                    "lon": False,
+                },
+                zoom=5.2,
+                center={"lat": 54.5, "lon": -3.0},
+                map_style=base_map_style,
             )
+        else:
+            fig_map = px.scatter_mapbox(
+                latest_df,
+                lat="lat",
+                lon="lon",
+                color="predicted_risk_level",
+                color_discrete_map=risk_color_map,
+                category_orders={"predicted_risk_level": category_order},
+                hover_name="Site",
+                custom_data=["Site"],
+                hover_data={
+                    "predicted_risk_level": True,
+                    "predicted_risk": ":.4f",
+                    "lat": False,
+                    "lon": False,
+                },
+                zoom=5.2,
+                center={"lat": 54.5, "lon": -3.0},
+                mapbox_style=base_map_style,
+            )
+
+        fig_map.update_traces(
+            marker={"size": 14, "opacity": 0.85},
+            unselected={"marker": {"opacity": 0.85}},
+            selected={"marker": {"opacity": 0.85}},
         )
 
-    map_layout_kwargs = {
-        MAP_DICT_KEY: dict(
-            style=base_map_style,
-            center=dict(lat=54.5, lon=-3.0),
-            zoom=5.2,
-        ),
-        "height": 680,
-        "showlegend": False,
-        "margin": dict(r=0, t=0, l=0, b=0),
-    }
+        selected_row = latest_df[latest_df["Site"] == selected_site]
+        if not selected_row.empty:
+            fig_map.add_trace(
+                ScatterMapTrace(
+                    lat=selected_row["lat"],
+                    lon=selected_row["lon"],
+                    mode="markers",
+                    marker=dict(size=6, color="black"),
+                    hoverinfo="skip",
+                    showlegend=False,
+                )
+            )
 
-    fig_map.update_layout(**map_layout_kwargs)
+        fig_map.update_layout(
+            height=680,
+            showlegend=False,
+            margin={"r": 0, "t": 0, "l": 0, "b": 0},
+        )
 
+    # -----------------------------------------------------
+    # Render Map & Handle Click Interactivity
+    # -----------------------------------------------------
     map_event = st.plotly_chart(
         fig_map,
         use_container_width=True,
