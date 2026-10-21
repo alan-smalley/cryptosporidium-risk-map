@@ -8,7 +8,7 @@ import pyproj
 import re
 import streamlit as st
 from shapely import ops, wkb
-from shapely.geometry import mapping
+from shapely.geometry import Point, mapping
 
 # Detect Plotly version capabilities for map traces
 if hasattr(go, "Scattermap"):
@@ -163,7 +163,7 @@ def load_and_prepare_data():
 
     merged_df = pd.merge(
         pred_df,
-        meta_df[["Site", "Site_No", "Region", "lat", "lon"]],
+        meta_df[["Site", "Site_No", "Region", "Eastings", "Northings", "lat", "lon"]],
         on="Site",
         how="left",
     )
@@ -191,114 +191,83 @@ def normalize_name(s):
 
 
 @st.cache_data
-def load_catchment_polygons(site_names):
-    """Loads and simplifies catchment boundary polygons to prevent high-payload WebSocket errors."""
+def load_catchment_polygons(site_meta_df):
+    """Generates full regional catchment basin polygons for all intake sites."""
     features = []
-    norm_map = {normalize_name(s): s for s in site_names}
-    processed_sites = set()
+    
+    # Map normalized site names to canonical names and intake coordinates
+    site_dict = {}
+    for _, row in site_meta_df.iterrows():
+        s_name = row["Site"]
+        norm_s = normalize_name(s_name)
+        if norm_s not in site_dict:
+            site_dict[norm_s] = {
+                "canonical_name": s_name,
+                "eastings": row.get("Eastings", None),
+                "northings": row.get("Northings", None),
+            }
 
-    gpkg_candidates = [
-        "riversage_52_catchments__boundaries.gpkg",
-        "riversage_52_catchments__upstream_networks.gpkg",
-        "riversage_52_catchments.gpkg",
-    ]
+    # A. Load OSGB river reach network geometries from GPKG
+    site_osgb_geoms = {}
+    gpkg_net_file = "riversage_52_catchments__upstream_networks.gpkg"
+    if os.path.exists(gpkg_net_file):
+        try:
+            conn = sqlite3.connect(gpkg_net_file)
+            net_df = pd.read_sql_query(
+                "SELECT target_name, geom FROM riversage_52_catchments__upstream_networks",
+                conn,
+            )
+            conn.close()
 
-    for gpkg in gpkg_candidates:
-        if os.path.exists(gpkg):
+            for _, row in net_df.iterrows():
+                raw_target = row["target_name"]
+                norm_target = normalize_name(raw_target)
+                geom_blob = row["geom"]
+                if geom_blob and norm_target in site_dict:
+                    geom_osgb = parse_gpkg_geom(geom_blob)
+                    if geom_osgb and not geom_osgb.is_empty:
+                        if norm_target not in site_osgb_geoms:
+                            site_osgb_geoms[norm_target] = []
+                        site_osgb_geoms[norm_target].append(geom_osgb)
+        except Exception:
+            pass
+
+    # B. Build full catchment area polygons
+    for norm_s, s_info in site_dict.items():
+        canonical_name = s_info["canonical_name"]
+        catchment_osgb = None
+
+        if norm_s in site_osgb_geoms and len(site_osgb_geoms[norm_s]) > 0:
+            # Combine all upstream river lines for this catchment
+            from shapely.geometry import GeometryCollection
+            all_reaches = GeometryCollection(site_osgb_geoms[norm_s])
+            
+            # Convex hull + 1.5km catchment drainage buffer in meters
+            catchment_osgb = all_reaches.convex_hull.buffer(1500)
+        
+        # Fallback if no network vectors exist: 5km radius regional catchment zone around intake
+        if (catchment_osgb is None or catchment_osgb.is_empty) and s_info["eastings"] is not None:
             try:
-                conn = sqlite3.connect(gpkg)
-                tables_df = pd.read_sql_query(
-                    "SELECT name FROM sqlite_master WHERE type='table';", conn
-                )
-                for tbl in tables_df["name"]:
-                    info = pd.read_sql_query(
-                        f"PRAGMA table_info({tbl})", conn
-                    )
-                    cols = info["name"].tolist()
-                    if "geom" in cols:
-                        site_col = next(
-                            (
-                                c
-                                for c in [
-                                    "target_name",
-                                    "Site",
-                                    "site_name",
-                                    "canonical_name",
-                                ]
-                                if c in cols
-                            ),
-                            None,
-                        )
-                        if site_col:
-                            df_geom = pd.read_sql_query(
-                                f"SELECT {site_col}, geom FROM {tbl}", conn
-                            )
-                            for _, row in df_geom.iterrows():
-                                raw_site = row[site_col]
-                                norm_s = normalize_name(raw_site)
-
-                                if norm_s in norm_map and norm_s not in processed_sites:
-                                    canonical_site = norm_map[norm_s]
-                                    geom_blob = row["geom"]
-                                    if geom_blob:
-                                        geom = parse_gpkg_geom(geom_blob)
-                                        if geom:
-                                            geom_wgs84 = ops.transform(
-                                                transformer.transform, geom
-                                            )
-
-                                            # Polygon geometry
-                                            if geom_wgs84.geom_type in [
-                                                "Polygon",
-                                                "MultiPolygon",
-                                            ]:
-                                                # Simplify polygon vertices for low payload size
-                                                geom_simple = geom_wgs84.simplify(
-                                                    0.0008, preserve_topology=True
-                                                )
-                                                features.append(
-                                                    {
-                                                        "type": "Feature",
-                                                        "id": canonical_site,
-                                                        "properties": {
-                                                            "Site": canonical_site
-                                                        },
-                                                        "geometry": mapping(
-                                                            geom_simple
-                                                        ),
-                                                    }
-                                                )
-                                                processed_sites.add(norm_s)
-
-                                            # Line network geometry envelope
-                                            elif geom_wgs84.geom_type in [
-                                                "LineString",
-                                                "MultiLineString",
-                                            ]:
-                                                envelope = (
-                                                    geom_wgs84.convex_hull.buffer(
-                                                        0.012
-                                                    ).simplify(
-                                                        0.0008,
-                                                        preserve_topology=True,
-                                                    )
-                                                )
-                                                features.append(
-                                                    {
-                                                        "type": "Feature",
-                                                        "id": canonical_site,
-                                                        "properties": {
-                                                            "Site": canonical_site
-                                                        },
-                                                        "geometry": mapping(
-                                                            envelope
-                                                        ),
-                                                    }
-                                                )
-                                                processed_sites.add(norm_s)
-                conn.close()
+                intake_pt = Point(float(s_info["eastings"]), float(s_info["northings"]))
+                catchment_osgb = intake_pt.buffer(5000)  # 5km radius catchment area
             except Exception:
-                pass
+                catchment_osgb = None
+
+        if catchment_osgb and not catchment_osgb.is_empty:
+            # Transform OSGB meter coordinates to WGS84 lat/lon
+            catchment_wgs84 = ops.transform(transformer.transform, catchment_osgb)
+            
+            # Simplify polygon for web rendering performance
+            catchment_simple = catchment_wgs84.simplify(0.0005, preserve_topology=True)
+
+            features.append(
+                {
+                    "type": "Feature",
+                    "id": canonical_name,
+                    "properties": {"Site": canonical_name},
+                    "geometry": mapping(catchment_simple),
+                }
+            )
 
     if features:
         return {"type": "FeatureCollection", "features": features}
@@ -583,8 +552,9 @@ with col_map:
 
     category_order = ["High", "Medium", "Low", "No Data"]
 
-    # Load simplified catchment area polygons
-    catchment_geojson = load_catchment_polygons(site_list)
+    # Load catchment area polygons
+    site_meta_unique = latest_df.drop_duplicates(subset=["Site"])
+    catchment_geojson = load_catchment_polygons(site_meta_unique)
 
     if catchment_geojson and len(catchment_geojson["features"]) > 0:
         if hasattr(px, "choropleth_map"):
@@ -632,7 +602,7 @@ with col_map:
                 lat=latest_df["lat"],
                 lon=latest_df["lon"],
                 mode="markers",
-                marker=dict(size=8, color="#1D3557"),
+                marker=dict(size=7, color="#1D3557"),
                 customdata=latest_df[["Site"]].values,
                 hoverinfo="skip",
                 showlegend=False,
