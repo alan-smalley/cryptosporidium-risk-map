@@ -21,8 +21,12 @@ else:
     MAP_DICT_KEY = "mapbox"
 
 # ---------------------------------------------------------
-# Site Selection & Initial Load Configuration
+# Code-Level Data Source & Site Selection Configuration
 # ---------------------------------------------------------
+# Switch prediction CSV source here in code:
+# ACTIVE_PRED_FILE = "compiled_site_adaptive_predictions_with_risk_levels.csv"
+ACTIVE_PRED_FILE = "demo_data.csv"
+
 INITIAL_SITE = "River_Thames_Laleham"
 
 ENABLE_CUSTOM_SITE_FILTER = False
@@ -129,18 +133,15 @@ transformer = pyproj.Transformer.from_crs(
 # 3. Secure Data Loading & Helper Functions
 # ---------------------------------------------------------
 @st.cache_data
-def load_and_prepare_data():
+def load_and_prepare_data(pred_url):
     meta_url = st.secrets.get("META_DATA_URL", "zs_combined_(all)_REORDERED.csv")
-    pred_url = st.secrets.get(
-        "PRED_DATA_URL", "compiled_site_adaptive_predictions_with_risk_levels.csv"
-    )
 
     try:
         meta_df = pd.read_csv(meta_url)
         pred_df = pd.read_csv(pred_url)
     except Exception as e:
         st.error(
-            f"⚠️ Failed to load CSV data. Please check file paths or Streamlit Secrets. Details: {e}"
+            f"⚠️ Failed to load CSV data ({pred_url}). Please check file paths or Streamlit Secrets. Details: {e}"
         )
         st.stop()
 
@@ -437,7 +438,8 @@ def calculate_map_center_and_zoom(lats, lons):
     return center_lat, center_lon, zoom
 
 
-df = load_and_prepare_data()
+# Load dataset configured in code
+df = load_and_prepare_data(ACTIVE_PRED_FILE)
 
 # Filter sites if a custom list is defined
 all_available_sites = sorted(df["Site"].unique())
@@ -577,7 +579,6 @@ with st.sidebar.expander("ℹ️ Portal Disclaimer & Thresholds"):
 st.title("UK Cryptosporidium Catchment Risk Portal")
 st.caption("Interactive Risk Predictions & Historical Water Intake Monitoring")
 
-# Adjusted column ratio to shift map left and widen the right inspector column
 col_map, col_chart = st.columns([1.5, 1.0])
 
 with col_map:
@@ -594,9 +595,6 @@ with col_map:
     }
     category_order = ["High", "Medium", "Low", "No Data"]
 
-    # -----------------------------------------------------
-    # MODE A: Catchment Area Polygons
-    # -----------------------------------------------------
     if map_view_mode == "Catchment Polygons":
         site_meta_unique = latest_df.drop_duplicates(subset=["Site"])
         sites_tuples = tuple(
@@ -619,7 +617,6 @@ with col_map:
                 else 0.0
             )
 
-            # Sort DataFrame DESCENDING by area (Largest Area first = bottom layer, Smallest Area last = top layer)
             latest_df_sorted = latest_df.sort_values(
                 "area_sq_km", ascending=False
             )
@@ -657,7 +654,6 @@ with col_map:
                         )
                     )
 
-            # Overlay intake location markers on top of catchment polygons
             fig_map.add_trace(
                 ScatterMapTrace(
                     lat=latest_df_sorted["lat"],
@@ -670,7 +666,6 @@ with col_map:
                 )
             )
 
-            # Highlight active site marker
             selected_row = latest_df[latest_df["Site"] == selected_site]
             if not selected_row.empty:
                 fig_map.add_trace(
@@ -697,7 +692,6 @@ with col_map:
             fig_map.update_layout(**map_layout_kwargs)
 
         else:
-            # Fallback to scatter map if polygon geometries unavailable
             if hasattr(px, "scatter_map"):
                 fig_map = px.scatter_map(
                     latest_df,
@@ -733,9 +727,6 @@ with col_map:
                 margin={"r": 0, "t": 0, "l": 0, "b": 0},
             )
 
-    # -----------------------------------------------------
-    # MODE B: Intake Point Markers (Classic View)
-    # -----------------------------------------------------
     else:
         if hasattr(px, "scatter_map"):
             fig_map = px.scatter_map(
@@ -803,9 +794,6 @@ with col_map:
             margin={"r": 0, "t": 0, "l": 0, "b": 0},
         )
 
-    # -----------------------------------------------------
-    # Render Map & Handle Click Interactivity
-    # -----------------------------------------------------
     map_event = st.plotly_chart(
         fig_map,
         use_container_width=True,
@@ -838,7 +826,6 @@ with col_chart:
 
     site_df = df[df["Site"] == selected_site].sort_values("YearMonth")
 
-    # --- Chart Settings / Range Filter Expander ---
     with st.expander("⚙️ Chart Range Settings"):
         use_manual_x = st.checkbox(
             "Override Date Range (X-Axis)", value=False
@@ -1002,7 +989,6 @@ site_csos, river_lons, river_lats = get_site_spatial_data(
     selected_site, amber_thresh=amber_thresh, red_thresh=red_thresh
 )
 
-# Filter site_csos to show BOTH High (red) AND Medium (amber) Impact CSOs (>= amber_thresh)
 if not site_csos.empty:
     high_med_csos = site_csos[site_csos["Gain_Percent"] >= amber_thresh].copy()
 else:
@@ -1011,7 +997,6 @@ else:
 if river_lons or not high_med_csos.empty:
     fig_cso_map = go.Figure()
 
-    # A. Upstream River Reach Vectors
     if river_lons:
         fig_cso_map.add_trace(
             ScatterMapTrace(
@@ -1024,7 +1009,6 @@ if river_lons or not high_med_csos.empty:
             )
         )
 
-    # B. Target Intake Location
     selected_row = latest_df[latest_df["Site"] == selected_site]
     intake_lat, intake_lon = None, None
     if not selected_row.empty:
@@ -1042,7 +1026,6 @@ if river_lons or not high_med_csos.empty:
             )
         )
 
-    # C. High & Medium Impact CSOs with Permit Number displayed on hover
     cso_color_map = {
         "Red (High Impact)": "#E63946",
         "Amber (Moderate Impact)": "#FFB703",
@@ -1086,7 +1069,6 @@ if river_lons or not high_med_csos.empty:
                 )
             )
 
-    # Collect all coordinates to calculate initial bounding box
     all_lats = list(river_lats)
     all_lons = list(river_lons)
     if not high_med_csos.empty:
@@ -1106,7 +1088,6 @@ if river_lons or not high_med_csos.empty:
         "zoom": initial_zoom,
     }
 
-    # Zoomable layout settings with initial auto-fit view
     layout_kwargs = {
         MAP_DICT_KEY: map_config,
         "margin": dict(l=0, r=0, t=0, b=0),
@@ -1160,3 +1141,9 @@ else:
     st.info(
         f"No upstream network or CSO features found for intake site: **{selected_site}**."
     )
+
+# ---------------------------------------------------------
+# 7. Footer / Active CSV File Indicator
+# ---------------------------------------------------------
+st.divider()
+st.caption(f"📁 **Data Source File:** `{ACTIVE_PRED_FILE}`")
