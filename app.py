@@ -35,7 +35,7 @@ DEFAULT_FALLBACK_BUFFER_M = 4000
 # Per-site buffer radius overrides in meters (OSGB)
 # Use a smaller value (e.g., 400 - 700) for short/small catchments so they follow the river shape
 SITE_BUFFER_OVERRIDES = {
-    "SurfaceWater_LOUTH_CANAL_INPUT_TO_COVENHAM_RESERVOIR": 500,
+    "SurfaceWater_LOUTH_CANAL_INPUT_TO_COVENHAM_RESERVOIR": 1000,
 }
 
 
