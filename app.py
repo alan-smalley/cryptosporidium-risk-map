@@ -27,7 +27,18 @@ else:
 ACTIVE_PRED_FILE = "compiled_site_adaptive_predictions_with_risk_levels.csv"
 # ACTIVE_PRED_FILE = "demo_data_(Nov).csv"
 
-INITIAL_SITE = "River_Thames_Laleham"
+INITIAL_SITE = "River_Lee_Girling"
+
+DEFAULT_RIVER_BUFFER_M = 1800
+DEFAULT_FALLBACK_BUFFER_M = 4000
+
+# Per-site buffer radius overrides in meters (OSGB)
+# Use a smaller value (e.g., 400 - 700) for short/small catchments so they follow the river shape
+SITE_BUFFER_OVERRIDES = {
+    "SurfaceWater_LOUTH_CANAL_INPUT_TO_COVENHAM_RESERVOIR": 500,
+}
+
+
 
 ENABLE_CUSTOM_SITE_FILTER = False
 
@@ -187,18 +198,20 @@ def normalize_name(s):
 
 
 @st.cache_data
+@st.cache_data
 def load_catchment_polygons_from_coords(sites_tuples):
-    """Memory-efficient generation of catchment polygons indexed by site name."""
+    """Memory-efficient generation of catchment polygons with per-site buffer support."""
     features_by_site = {}
 
     site_dict = {}
-    for s_name, e_val, n_val in sites_tuples:
+    for s_name, e_val, n_val, custom_buf in sites_tuples:
         norm_s = normalize_name(s_name)
         if norm_s not in site_dict:
             site_dict[norm_s] = {
                 "canonical_name": s_name,
                 "eastings": e_val,
                 "northings": n_val,
+                "custom_buf": custom_buf,
             }
 
     # Load OSGB upstream river reach geometries
@@ -222,8 +235,15 @@ def load_catchment_polygons_from_coords(sites_tuples):
                     if geom_osgb and not geom_osgb.is_empty:
                         if norm_target not in site_osgb_geoms:
                             site_osgb_geoms[norm_target] = []
+                        custom_buf = site_dict[norm_target]["custom_buf"]
+                        eff_buf = (
+                            float(custom_buf)
+                            if custom_buf is not None
+                            else float(DEFAULT_RIVER_BUFFER_M)
+                        )
+                        simp_tol = min(100.0, eff_buf * 0.1)
                         site_osgb_geoms[norm_target].append(
-                            geom_osgb.simplify(100.0, preserve_topology=False)
+                            geom_osgb.simplify(simp_tol, preserve_topology=False)
                         )
         except Exception:
             pass
@@ -231,20 +251,33 @@ def load_catchment_polygons_from_coords(sites_tuples):
     # Build organic catchment basin polygons
     for norm_s, s_info in site_dict.items():
         canonical_name = s_info["canonical_name"]
+        custom_buf = s_info["custom_buf"]
+        river_buf = (
+            float(custom_buf)
+            if custom_buf is not None
+            else float(DEFAULT_RIVER_BUFFER_M)
+        )
+        fallback_buf = (
+            float(custom_buf)
+            if custom_buf is not None
+            else float(DEFAULT_FALLBACK_BUFFER_M)
+        )
         catchment_osgb = None
 
         if norm_s in site_osgb_geoms and len(site_osgb_geoms[norm_s]) > 0:
             all_reaches = GeometryCollection(site_osgb_geoms[norm_s])
-            catchment_osgb = all_reaches.buffer(1800, resolution=4)
+            catchment_osgb = all_reaches.buffer(river_buf, resolution=6)
 
-        # Fallback if no network vectors exist: 4km radius catchment zone around intake
+        # Fallback if no network vectors exist
         e_val, n_val = s_info["eastings"], s_info["northings"]
         if (
-            catchment_osgb is None or catchment_osgb.is_empty
-        ) and pd.notna(e_val) and pd.notna(n_val):
+            (catchment_osgb is None or catchment_osgb.is_empty)
+            and pd.notna(e_val)
+            and pd.notna(n_val)
+        ):
             try:
                 intake_pt = Point(float(e_val), float(n_val))
-                catchment_osgb = intake_pt.buffer(4000, resolution=8)
+                catchment_osgb = intake_pt.buffer(fallback_buf, resolution=8)
             except Exception:
                 catchment_osgb = None
 
@@ -254,8 +287,9 @@ def load_catchment_polygons_from_coords(sites_tuples):
             catchment_wgs84 = ops.transform(
                 transformer.transform, catchment_osgb
             )
+            wgs_tol = 0.0001 if custom_buf is not None else 0.0003
             catchment_simple = catchment_wgs84.simplify(
-                0.0003, preserve_topology=True
+                wgs_tol, preserve_topology=True
             )
 
             feature = {
@@ -270,7 +304,6 @@ def load_catchment_polygons_from_coords(sites_tuples):
             features_by_site[canonical_name] = feature
 
     return features_by_site
-
 
 @st.cache_data
 def get_site_spatial_data(site_name, amber_thresh=0.5, red_thresh=2.0):
@@ -595,13 +628,18 @@ with col_map:
     }
     category_order = ["High", "Medium", "Low", "No Data"]
 
+
     if map_view_mode == "Catchment Polygons":
+        norm_overrides = {
+            normalize_name(k): v for k, v in SITE_BUFFER_OVERRIDES.items()
+        }
         site_meta_unique = latest_df.drop_duplicates(subset=["Site"])
         sites_tuples = tuple(
             (
                 row["Site"],
                 row.get("Eastings", None),
                 row.get("Northings", None),
+                norm_overrides.get(normalize_name(row["Site"]), None),
             )
             for _, row in site_meta_unique.iterrows()
         )
