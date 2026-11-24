@@ -24,8 +24,8 @@ else:
 # Code-Level Data Source & Site Selection Configuration
 # ---------------------------------------------------------
 # Switch prediction CSV source here in code:
-ACTIVE_PRED_FILE = "compiled_site_adaptive_predictions_with_risk_levels.csv"
-# ACTIVE_PRED_FILE = "demo_data_(Nov).csv"
+# ACTIVE_PRED_FILE = "compiled_site_adaptive_predictions_with_risk_levels.csv"
+ACTIVE_PRED_FILE = "demo_data_v3.csv"
 
 INITIAL_SITE = "River_Lee_Girling"
 
@@ -313,7 +313,8 @@ def get_site_spatial_data(site_name, amber_thresh=0.5, red_thresh=2.0):
     # A. Feature Importance Parsing
     cso_importance = {}
     try:
-        df_feat = pd.read_csv("all_site_feature_importance.csv")
+        #df_feat = pd.read_csv("all_site_feature_importance.csv")
+        df_feat = pd.read_csv("all_site_feature_importance_walkforward_mean.csv")
         df_feat["norm_site"] = df_feat["Site"].apply(normalize_name)
         site_feats = df_feat[df_feat["norm_site"] == norm_site_name]
 
